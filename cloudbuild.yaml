@@ -36,3 +36,6 @@ steps:
 
 images:
   - 'europe-west1-docker.pkg.dev/ai-hack26ham-475/docker-repo/clinical-trials-mcp:$TAG_NAME'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
