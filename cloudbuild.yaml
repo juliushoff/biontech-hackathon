@@ -1,0 +1,41 @@
+steps:
+  # Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'europe-west1-docker.pkg.dev/ai-hack26ham-475/docker-repo/clinical-trials-mcp:$TAG_NAME'
+      - '.'
+
+  # Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/ai-hack26ham-475/docker-repo/clinical-trials-mcp:$TAG_NAME'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'clinical-trials-mcp'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/ai-hack26ham-475/docker-repo/clinical-trials-mcp:$TAG_NAME'
+      - '--region'
+      - 'europe-west1'
+      - '--port'
+      - '8000'
+      - '--memory'
+      - '1Gi'
+      - '--timeout'
+      - '3600'
+      - '--no-allow-unauthenticated'
+      - '--set-secrets'
+      - 'API_KEY=api-key:latest'
+
+images:
+  - 'europe-west1-docker.pkg.dev/ai-hack26ham-475/docker-repo/clinical-trials-mcp:$TAG_NAME'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
