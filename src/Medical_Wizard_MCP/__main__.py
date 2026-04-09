@@ -20,4 +20,4 @@ registry.register(OpenFDASource())
 registry.register(PubMedSource())
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8000, mount_path="/mcp")
+    mcp.run(transport="streamable-http")

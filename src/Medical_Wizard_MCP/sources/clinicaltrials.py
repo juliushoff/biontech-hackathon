@@ -19,7 +19,7 @@ class ClinicalTrialsSource(BaseSource):
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
             timeout=30.0,
-            headers={"User-Agent": "clinical-trials-mcp/0.1.0"},
+            headers={"User-Agent": "medical-wizard-mcp/0.1.0"},
         )
 
     async def close(self) -> None:

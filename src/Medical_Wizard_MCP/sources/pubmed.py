@@ -40,10 +40,10 @@ class PubMedSource(BaseSource):
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
             timeout=30.0,
-            headers={"User-Agent": "clinical-trials-mcp/0.1.0"},
+            headers={"User-Agent": "medical-wizard-mcp/0.1.0"},
         )
         self._api_key = os.getenv("PUBMED_API_KEY")
-        self._email = os.getenv("PUBMED_EMAIL", "clinical-trials-mcp@example.com")
+        self._email = os.getenv("PUBMED_EMAIL", "medical-wizard-mcp@example.com")
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -153,7 +153,7 @@ class PubMedSource(BaseSource):
         }
 
     def _base_params(self) -> dict[str, str]:
-        params = {"tool": "clinical-trials-mcp"}
+        params = {"tool": "medical-wizard-mcp"}
         if self._api_key:
             params["api_key"] = self._api_key
         if self._email:

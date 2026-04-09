@@ -1,13 +1,13 @@
-# Clinical Trial Intelligence MCP
+# Medical Wizard MCP
 
-Python MCP server for clinical trial and publication intelligence, built for BioNTech.
+Python MCP server for clinical trial and publication intelligence.
 
 The project follows an LLM-first design:
 - MCP tools return structured, minimal data
 - source adapters handle HTTP, parsing, and normalization
 - the LLM performs synthesis, reasoning, and interpretation
 
----
+`README.md` is the canonical human-facing setup and usage document. `AGENTS.md` contains only repo-specific guidance for coding agents.
 
 ## Table of Contents
 
@@ -21,6 +21,12 @@ The project follows an LLM-first design:
 8. [Roadmap](#roadmap)
 
 ---
+
+Implemented MCP tools today:
+- `search_trials`
+- `get_trial_details`
+- `get_trial_timelines`
+- `search_publications`
 
 ## Architecture
 
@@ -52,8 +58,8 @@ tests/
 
 ```text
 User question
-  -> LibreChat (BioNTech interface)
-  -> MCP protocol (stdio)
+  -> LibreChat / Codex / MCP Inspector
+  -> MCP protocol (streamable-http)
   -> MCP tool
   -> SourceRegistry
   -> one or more source adapters
@@ -71,6 +77,10 @@ User question
 
 ---
 
+## Endpoint Notes
+
+The detailed catalog below mixes currently implemented tools with roadmap ideas from the original hackathon scope. Treat the code in `src/Medical_Wizard_MCP/tools/` as the source of truth for what is available right now.
+
 ## Setup
 
 ### Requirements
@@ -82,22 +92,49 @@ User question
 
 ```bash
 git clone <repo-url>
-cd clinical-trial-mcp
-uv pip install -e ".[dev]"
+cd medical-wizard-mcp
+uv sync --dev
 ```
 
 Without `uv`:
 
 ```bash
-python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
+```
+
+If macOS resolves `python` or `python3` to the Xcode system Python, use the bootstrap script instead:
+
+```bash
+./local-dev/bootstrap.sh
+source .venv/bin/activate
 ```
 
 ### Run the Server
 
 ```bash
-python -m Medical_Wizard_MCP
+./local-dev/run-server.sh
+```
+
+Run the server with verbose MCP logs:
+
+```bash
+FASTMCP_LOG_LEVEL=DEBUG ./local-dev/run-server.sh
+```
+
+### Server Endpoint
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+### Codex Configuration
+
+```bash
+codex mcp add medical-wizard-mcp --url http://127.0.0.1:8000/mcp
+codex mcp list
 ```
 
 ### LibreChat Configuration
@@ -106,12 +143,9 @@ Add to your `librechat.yaml`:
 
 ```yaml
 mcpServers:
-  clinical-trial-intelligence:
-    command: python
-    args:
-      - -m
-      - Medical_Wizard_MCP
-    type: stdio
+  medical-wizard-mcp:
+    type: streamable-http
+    url: http://127.0.0.1:8000/mcp
 ```
 
 ### Optional Environment Variables
@@ -334,7 +368,7 @@ Foundational data source for `find_whitespaces` and `competitive_landscape`.
 
 Identify underserved areas in a cancer indication by analyzing trial density
 across phases and intervention mechanisms. Returns structured signals for
-the LLM to evaluate as strategic whitespaces for BioNTech's pipeline.
+the LLM to evaluate as strategic whitespaces for a sponsor's pipeline.
 
 **Input:**
 
@@ -388,7 +422,7 @@ the LLM to evaluate as strategic whitespaces for BioNTech's pipeline.
 
 **Example questions:**
 - "Are there white spaces or underserved segments in pancreatic cancer?"
-- "Where could BioNTech's mRNA platform enter without heavy competition?"
+- "Where could an mRNA platform enter without heavy competition?"
 
 ---
 
@@ -437,7 +471,7 @@ in which phases, with which mechanisms, and how saturated the market is.
 **Example questions:**
 - "Who is active in NSCLC and at what phase?"
 - "How saturated is the breast cancer market?"
-- "Compare BioNTech vs Merck in NSCLC"
+- "Compare two sponsors in NSCLC"
 
 ---
 
@@ -498,7 +532,7 @@ Retrieve already approved therapies per indication from OpenFDA.
 
 **Example questions:**
 - "What is already approved in NSCLC?"
-- "Which therapies does BioNTech need to outperform in breast cancer?"
+- "Which therapies would a new sponsor need to outperform in breast cancer?"
 
 ---
 
@@ -741,6 +775,43 @@ defined in `src/Medical_Wizard_MCP/models/trials.py`.
 
 ---
 
+## Debugging MCP Locally
+
+The most effective local debugging flow is:
+
+1. Run the server with debug logging in one terminal:
+
+```bash
+FASTMCP_LOG_LEVEL=DEBUG ./local-dev/run-server.sh
+```
+
+2. Launch MCP Inspector in a second terminal:
+
+```bash
+npx -y @modelcontextprotocol/inspector
+```
+
+3. In the Inspector UI, connect with:
+- Transport: `Streamable HTTP`
+- URL: `http://127.0.0.1:8000/mcp`
+
+Use Inspector to:
+- verify tool discovery
+- inspect tool input schemas
+- execute tools manually with small test inputs
+- inspect raw outputs
+- watch notifications and logs while requests run
+
+Recommended first checks:
+- `search_publications(query="mrna cancer vaccine", max_results=2)`
+- `search_trials(condition="glioblastoma", max_results=2)`
+- `get_trial_timelines(condition="NSCLC", max_results=2)`
+
+Notes:
+- `GET /` returning `404 Not Found` is expected. The MCP endpoint is `/mcp`, not `/`.
+- Inspector is the best tool for protocol and tool debugging.
+- Codex is better as a second step, once the server already works correctly in Inspector.
+
 ## Testing
 
 ### Run all tests
@@ -759,6 +830,12 @@ python -m pytest
 
 ```bash
 uv run pytest tests/test_pubmed.py
+```
+
+Without `uv`:
+
+```bash
+.venv/bin/python -m pytest tests/test_pubmed.py
 ```
 
 Current PubMed test coverage:
