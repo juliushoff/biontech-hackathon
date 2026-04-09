@@ -530,7 +530,8 @@ async def test_search_conference_abstracts_returns_standard_envelope(
     assert response["_meta"]["queried_sources"] == ["europe_pmc"]
     assert response["_meta"]["requested_filters"]["effective_query"] == "neoantigen therapy melanoma"
     assert response["_meta"]["requested_filters"]["conference_series"] == ["ASCO", "AACR"]
-    assert response["_meta"]["requested_filters"]["minimum_conference_result_score"] == 0.55
+    assert response["_meta"]["requested_filters"]["minimum_conference_result_score"] == 0.35
+    assert response["_meta"]["requested_filters"]["strong_conference_result_score"] == 0.55
     assert response["_meta"]["evidence_trace"][0]["step"] == "search_conference_sources"
     assert response["_meta"]["evidence_trace"][1]["step"] == "rank_conference_results"
     assert any(
@@ -540,7 +541,53 @@ async def test_search_conference_abstracts_returns_standard_envelope(
     assert response["results"][0]["title"].startswith("Late-breaking ASCO abstract")
     assert response["results"][0]["conference_series"] == "ASCO"
     assert response["results"][0]["conference_result_score"] >= 0.55
+    assert response["results"][0]["conference_match_strength"] == "strong"
     assert response["results"][0]["source_refs"][0]["id"] == "PPR1234"
+
+
+@pytest.mark.asyncio
+async def test_search_conference_abstracts_keeps_related_matches_above_broad_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_search_conference_abstracts(**_: object) -> ListQueryResult[ConferenceAbstract]:
+        return ListQueryResult(
+            queried_sources=["europe_pmc"],
+            warnings=[],
+            items=[
+                ConferenceAbstract(
+                    source="europe_pmc",
+                    source_id="PPR9000",
+                    title="AACR perspectives on melanoma biomarker updates",
+                    authors=["Alice Smith"],
+                    conference_name="AACR Annual Meeting",
+                    conference_series="AACR",
+                    presentation_type="",
+                    abstract_number="",
+                    publication_year=2025,
+                    publication_date="2025-04-15",
+                    abstract="Melanoma updates from an AACR session with translational context.",
+                    doi=None,
+                    url="https://example.org/aacr-2025",
+                    journal="AACR",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(
+        "Medical_Wizard_MCP.tools.conferences.registry.search_conference_abstracts",
+        fake_search_conference_abstracts,
+    )
+
+    response = await search_conference_abstracts(
+        term="neoantigen therapy",
+        indication="melanoma",
+        conference_series=["AACR"],
+    )
+
+    assert response["count"] == 1
+    assert response["results"][0]["conference_result_score"] >= 0.35
+    assert response["results"][0]["conference_result_score"] < 0.55
+    assert response["results"][0]["conference_match_strength"] == "related"
 
 
 @pytest.mark.asyncio
