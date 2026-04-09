@@ -2,6 +2,7 @@ from typing import Any
 
 from ..server import mcp
 from ..sources import registry
+from ._evidence_quality import annotate_evidence_quality
 from ._inputs import build_literature_query
 from ._responses import list_response
 
@@ -79,12 +80,12 @@ Args:
         max_results=max_results,
         year_from=year_from,
     )
-    payload = [r.model_dump() for r in response.items]
+    payload = annotate_evidence_quality([r.model_dump() for r in response.items])
     return list_response(
         tool_name="search_publications",
         data_type="publication_search_results",
         items=payload,
-        quality_note="Publication records are normalized from PubMed E-utilities responses.",
+        quality_note="Publication records are normalized from PubMed E-utilities responses and annotated with a transparent evidence-quality tier based on source type and available metadata.",
         coverage="Peer-reviewed publications indexed in PubMed for the given query and optional year filter.",
         queried_sources=response.queried_sources,
         warnings=[warning.as_dict() for warning in response.warnings],
@@ -93,7 +94,7 @@ Args:
             {
                 "step": "search_pubmed",
                 "sources": response.queried_sources,
-                "note": "Queried peer-reviewed literature sources for the effective search string.",
+                "note": "Queried peer-reviewed literature sources for the effective search string and ranked the returned records by evidence-quality heuristics.",
                 "filters": {
                     **requested_filters,
                     "year_from": year_from,
@@ -184,12 +185,12 @@ Args:
         max_results=max_results,
         year_from=year_from,
     )
-    payload = [r.model_dump() for r in response.items]
+    payload = annotate_evidence_quality([r.model_dump() for r in response.items])
     return list_response(
         tool_name="search_preprints",
         data_type="preprint_search_results",
         items=payload,
-        quality_note="Preprint records are normalized from medRxiv API responses and exclude entries that already list a published journal DOI.",
+        quality_note="Preprint records are normalized from medRxiv API responses, exclude entries that already list a published journal DOI, and are annotated with transparent evidence-quality tiers.",
         coverage="Recent medRxiv preprints filtered locally against the requested query and optional year range.",
         queried_sources=response.queried_sources,
         warnings=[warning.as_dict() for warning in response.warnings],
@@ -198,7 +199,7 @@ Args:
             {
                 "step": "search_medrxiv",
                 "sources": response.queried_sources,
-                "note": "Queried preprint sources for the effective search string.",
+                "note": "Queried preprint sources for the effective search string and ranked the returned records by evidence-quality heuristics.",
                 "filters": {
                     **requested_filters,
                     "year_from": year_from,

@@ -30,6 +30,7 @@ Implemented MCP tools today:
 - `search_publications`
 - `search_preprints`
 - `search_approved_drugs`
+- `track_indication_changes`
 - `compare_trials`
 - `get_trial_density`
 - `analyze_competition_gaps`
@@ -48,6 +49,9 @@ Implemented MCP tools today:
 - `summarize_safety_signals`
 - `investigator_site_landscape`
 - `watch_indication_signals`
+- `get_document_passages`
+- `extract_structured_evidence`
+- `verify_claim_evidence`
 
 ## Architecture
 
@@ -70,12 +74,17 @@ src/Medical_Wizard_MCP/
     ├── timelines.py
     ├── publications.py
     ├── drugs.py
+    ├── monitoring.py
+    ├── audit.py
     ├── intelligence.py
+    ├── _evidence_quality.py
+    ├── _evidence_extraction.py
     ├── _intelligence.py
     └── _responses.py
 
 tests/
 ├── conftest.py
+├── test_audit_tools.py
 ├── test_intelligence_tools.py
 ├── test_pubmed.py
 ├── test_pubmed_live.py
@@ -199,6 +208,11 @@ In practice, the server now exposes three tool classes:
 - `derived`: server-side aggregation over raw records
 - `heuristic`: server-side estimation or recommendation that should be treated as a draft
 
+There are now also two usage modes worth treating differently in the attached LLM:
+
+- `monitoring`: use date-filtered delta tools only when the user asks what changed, what is new, or what appeared since a date
+- `audit`: use passage, structured extraction, and claim-verification tools only when the user explicitly asks for drilldown, evidence binding, or a more rigorous re-check
+
 If an attached LLM is unsure which tool to use, call `describe_tools` first.
 
 For domain filters, prefer the canonical parameter name `indication`.
@@ -217,6 +231,14 @@ Every tool response follows this envelope:
     "quality_note": "...",
     "coverage": "...",
     "evidence_sources": ["clinicaltrials_gov"],
+    "evidence_refs": [
+      {
+        "source": "clinicaltrials_gov",
+        "id": "NCT01234567",
+        "label": "Example study",
+        "url": "https://clinicaltrials.gov/study/NCT01234567"
+      }
+    ],
     "evidence_trace": [
       {
         "step": "search_trial_registry",
@@ -241,6 +263,15 @@ Every tool response follows this envelope:
 
 `evidence_sources` is the high-level provenance field to inspect first.
 `evidence_trace` shows which source(s) mattered at each internal processing step so an attached LLM or human reviewer can audit how the result was assembled and decide where to drill deeper.
+`evidence_refs` gives clickable document-level references for the records that informed the result.
+
+Evidence-oriented tools such as `search_publications`, `search_preprints`, `search_approved_drugs`, `link_trial_evidence`, and `track_indication_changes` now also annotate each returned record with:
+
+- `evidence_quality_tier`
+- `evidence_quality_score`
+- `evidence_quality_reason`
+
+The score is deterministic and source-aware, so an attached LLM can rank peer-reviewed literature, preprints, label evidence, and registry records transparently instead of treating every document as equally strong.
 
 ---
 

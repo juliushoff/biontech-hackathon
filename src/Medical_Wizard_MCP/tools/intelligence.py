@@ -8,6 +8,7 @@ from typing import Any
 from ..models import TrialDetail, TrialSummary
 from ..server import mcp
 from ..sources import registry
+from ._evidence_quality import annotate_evidence_quality, summarize_evidence_quality
 from ._intelligence import (
     ACTIVE_STATUSES,
     add_months_to_date,
@@ -1418,6 +1419,11 @@ Use this when you already have an NCT ID and want a quick bundle of likely relat
         warnings.extend(_warning_dicts(approval_response.warnings))
         queried_sources = sorted(set(queried_sources + approval_response.queried_sources))
 
+    linked_publications = annotate_evidence_quality([item.model_dump() for item in publication_response.items])
+    linked_preprints = annotate_evidence_quality(preprint_items)
+    related_approvals = annotate_evidence_quality(approval_items)
+    evidence_documents = linked_publications + linked_preprints + related_approvals
+
     result = {
         "link_type": "query_based_association",
         "trial": {
@@ -1434,14 +1440,15 @@ Use this when you already have an NCT ID and want a quick bundle of likely relat
             "preprints": preprint_query or publication_query or nct_id,
             "approvals": {"indication": condition_hint, "intervention": intervention_hint or None},
         },
-        "linked_publications": [item.model_dump() for item in publication_response.items],
-        "linked_preprints": preprint_items,
-        "related_approvals": approval_items,
+        "linked_publications": linked_publications,
+        "linked_preprints": linked_preprints,
+        "related_approvals": related_approvals,
         "evidence_summary": {
             "publication_count": len(publication_response.items),
             "preprint_count": len(preprint_items),
             "approval_count": len(approval_items),
         },
+        "evidence_quality_summary": summarize_evidence_quality(evidence_documents),
     }
 
     return detail_response(
@@ -1468,7 +1475,7 @@ Use this when you already have an NCT ID and want a quick bundle of likely relat
                 note="Queried peer-reviewed literature using trial-derived terms.",
                 filters={"query": publication_query or nct_id, "year_from": 2018, "max_results": 6},
                 output_kind="raw",
-                refs=[item.model_dump() for item in publication_response.items],
+                refs=linked_publications,
             ),
             *(
                 [
@@ -1478,7 +1485,7 @@ Use this when you already have an NCT ID and want a quick bundle of likely relat
                         note="Queried preprints using trial-derived terms.",
                         filters={"query": preprint_query or publication_query or nct_id, "year_from": 2022, "max_results": 4},
                         output_kind="raw",
-                        refs=preprint_items,
+                        refs=linked_preprints,
                     )
                 ]
                 if include_preprints
@@ -1492,7 +1499,7 @@ Use this when you already have an NCT ID and want a quick bundle of likely relat
                         note="Queried approved-drug labels for trial-related indication and intervention context.",
                         filters={"indication": condition_hint, "intervention": intervention_hint or None, "max_results": 5},
                         output_kind="raw",
-                        refs=approval_items,
+                        refs=related_approvals,
                     )
                 ]
                 if include_approvals and condition_hint

@@ -528,6 +528,93 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
             "forecast_readouts",
         ],
     },
+    "track_indication_changes": {
+        "category": "monitoring",
+        "family": "cross_source",
+        "output_kind": "derived",
+        "stability": "stable",
+        "workflow_position": "secondary",
+        "canonical_parameters": ["indication", "intervention", "sponsor", "since", "recent_years", "include_preprints", "max_results"],
+        "parameter_aliases": {},
+        "requires_identifiers": [],
+        "use_when": [
+            "The user asks what changed, what is new, or what appeared since a date.",
+            "You need a date-filtered delta view over the currently retrievable records.",
+        ],
+        "avoid_when": [
+            "You only need a current snapshot with no time comparison.",
+            "You need a true historical state diff that the current sources cannot reconstruct.",
+        ],
+        "typical_next_tools": [
+            "search_trials",
+            "search_publications",
+            "search_preprints",
+            "verify_claim_evidence",
+        ],
+    },
+    "get_document_passages": {
+        "category": "audit",
+        "family": "cross_source",
+        "output_kind": "derived",
+        "stability": "stable",
+        "workflow_position": "optional",
+        "canonical_parameters": ["query", "indication", "intervention", "nct_id", "include_preprints", "include_approvals", "max_documents", "max_passages"],
+        "parameter_aliases": {},
+        "requires_identifiers": [],
+        "use_when": [
+            "The user explicitly asks where a statement is supported or wants the relevant passage text.",
+            "You want a passage-level audit trail instead of only document-level links.",
+        ],
+        "avoid_when": [
+            "You only need high-level source discovery with no passage drilldown.",
+        ],
+        "typical_next_tools": [
+            "verify_claim_evidence",
+            "extract_structured_evidence",
+        ],
+    },
+    "extract_structured_evidence": {
+        "category": "audit",
+        "family": "cross_source",
+        "output_kind": "derived",
+        "stability": "stable",
+        "workflow_position": "optional",
+        "canonical_parameters": ["query", "indication", "intervention", "nct_id", "include_preprints", "include_approvals", "max_documents"],
+        "parameter_aliases": {},
+        "requires_identifiers": [],
+        "use_when": [
+            "The user explicitly wants atomic findings such as endpoints, percentages, durations, hazard ratios, or biomarker mentions.",
+            "You want a structured evidence layer before doing LLM-side synthesis.",
+        ],
+        "avoid_when": [
+            "You only need raw documents or links without server-side extraction.",
+        ],
+        "typical_next_tools": [
+            "get_document_passages",
+            "verify_claim_evidence",
+        ],
+    },
+    "verify_claim_evidence": {
+        "category": "audit",
+        "family": "cross_source",
+        "output_kind": "derived",
+        "stability": "stable",
+        "workflow_position": "optional",
+        "canonical_parameters": ["claim", "indication", "intervention", "nct_id", "include_preprints", "include_approvals", "max_documents", "max_passages"],
+        "parameter_aliases": {},
+        "requires_identifiers": [],
+        "use_when": [
+            "The user explicitly asks whether a claim is supported, contradicted, or where the evidence lies.",
+            "You want a claim-to-passage binding over the currently available evidence.",
+        ],
+        "avoid_when": [
+            "You only need source discovery or a generic overview with no claim audit.",
+        ],
+        "typical_next_tools": [
+            "get_document_passages",
+            "extract_structured_evidence",
+        ],
+    },
 }
 
 
