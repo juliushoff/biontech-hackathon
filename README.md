@@ -40,7 +40,7 @@ The project is intentionally LLM-first:
 - heuristic commercial-prioritization proxies when no pricing data is available
 - audit-style passage extraction and claim checking
 
-As of the current codebase, the server exposes `34` MCP tools:
+As of the current codebase, the server exposes `35` MCP tools:
 
 - `describe_tools`
 - `search_trials`
@@ -56,6 +56,7 @@ As of the current codebase, the server exposes `34` MCP tools:
 - `find_whitespaces`
 - `analyze_competition_gaps`
 - `competitive_landscape`
+- `screen_trial_candidates`
 - `get_recruitment_velocity`
 - `suggest_trial_design`
 - `suggest_patient_profile`
@@ -357,6 +358,7 @@ This makes the server easier for attached LLMs to route, cite, and audit.
 | `analyze_competition_gaps` | `heuristic` | whitespace / crowding hypothesis generation |
 | `find_whitespaces` | `heuristic` | deprecated alias for `analyze_competition_gaps` |
 | `competitive_landscape` | `derived` | sponsor, mechanism, and phase-level aggregation |
+| `screen_trial_candidates` | `derived` | deterministic include/exclude trial screen for high-precision answer sets |
 | `get_recruitment_velocity` | `derived` | recruitment speed heuristics |
 | `benchmark_trial_design` | `derived` | comparable design patterns |
 | `benchmark_eligibility_criteria` | `derived` | common eligibility signals |
@@ -419,6 +421,21 @@ Returned records are deduplicated by `nct_id`.
 - trial-plus-condition / intervention combinations
 
 This materially improves recall for named studies whose latest evidence is indexed under the study title rather than only the NCT ID.
+
+#### `screen_trial_candidates`
+
+`screen_trial_candidates` is the conservative anti-hallucination path for narrow trial-set questions.
+
+It:
+- starts from registry candidates for the requested indication and optional phase / sponsor filters
+- resolves detailed ClinicalTrials.gov records before making inclusion decisions
+- applies deterministic include/exclude checks for study type, phase, mechanism, patient segment, and terminal status handling
+- returns both `included_trials` and `excluded_trials` with explicit decision reasons
+
+Important usage guidance:
+- only studies under `included_trials` should be named in a final answer by an attached LLM
+- `excluded_trials` are meant for auditability, abstention, and explaining why borderline candidates were left out
+- the tool is intentionally conservative and may omit borderline candidates rather than guess
 
 #### `search_conference_abstracts`
 
@@ -630,6 +647,7 @@ uv run pytest
 ## Current Limitations
 
 - `link_trial_evidence` is still query-based association, not exact citation graph resolution.
+- `screen_trial_candidates` is intentionally conservative and may under-call borderline candidates when the verified detail text is ambiguous.
 - `track_indication_changes` is based on current retrievable records and date filtering, not persisted historical snapshots.
 - Audit tools only operate on directly available text such as registry fields, abstracts, and labels.
 - Conference retrieval is useful but inherently noisier than PubMed literature search.

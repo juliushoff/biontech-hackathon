@@ -8,6 +8,7 @@ from typing import Any
 from ..models import ConferenceAbstract, Publication, TrialDetail, TrialSummary
 from ..app import mcp
 from ..sources import registry
+from ._evidence_refs import document_refs_from_models
 from ._evidence_quality import annotate_evidence_quality, summarize_evidence_quality
 from ._inputs import build_trial_query_variants
 from ._intelligence import (
@@ -277,6 +278,97 @@ def _trial_biomarkers(trial: TrialDetail | dict[str, Any]) -> list[str]:
             " ".join(trial.secondary_outcomes),
         ]
     return extract_biomarkers(*text_chunks)
+
+
+def _phase_matches_filter(
+    trial_phase: str | None,
+    requested_phase: str | None,
+    *,
+    allow_combination_phases: bool,
+) -> bool:
+    if not requested_phase:
+        return True
+    requested_code = phase_code(requested_phase)
+    trial_phase_code = phase_code(trial_phase)
+    if not requested_code or not trial_phase_code:
+        return False
+    if trial_phase_code == requested_code:
+        return True
+    if allow_combination_phases:
+        return requested_code in {part.strip() for part in trial_phase_code.split("/") if part.strip()}
+    return False
+
+
+def _trial_status_sort_key(status: str | None) -> tuple[int, int, str]:
+    normalized = (status or "").upper()
+    if normalized == "RECRUITING":
+        return (0, 0, normalized)
+    if normalized == "NOT_YET_RECRUITING":
+        return (0, 1, normalized)
+    if normalized == "ACTIVE_NOT_RECRUITING":
+        return (0, 2, normalized)
+    if normalized == "COMPLETED":
+        return (1, 0, normalized)
+    if normalized in TERMINAL_STATUSES:
+        return (2, 0, normalized)
+    return (3, 0, normalized)
+
+
+def _label_intersection(candidate_labels: list[str], requested_labels: list[str]) -> list[str]:
+    requested_lookup = {label.casefold(): label for label in requested_labels if label}
+    matches: list[str] = []
+    for label in candidate_labels:
+        if label and label.casefold() in requested_lookup and label not in matches:
+            matches.append(label)
+    return matches
+
+
+def _trial_screen_row(
+    trial: TrialSummary | TrialDetail,
+    *,
+    candidate_mechanisms: list[str],
+    candidate_segments: list[str],
+    matched_mechanisms: list[str],
+    matched_segments: list[str],
+    phase_match: bool,
+    interventional_match: bool,
+    terminal_status: bool,
+    mechanism_filter_requested: bool,
+    patient_segment_filter_requested: bool,
+    decision: str,
+    reasons: list[str],
+) -> dict[str, Any]:
+    official_title = getattr(trial, "official_title", None)
+    study_type = getattr(trial, "study_type", None)
+    conditions = getattr(trial, "conditions", [])
+    payload = trial.model_dump() if hasattr(trial, "model_dump") else {}
+    return {
+        "source": trial.source,
+        "nct_id": trial.nct_id,
+        "brief_title": trial.brief_title,
+        "official_title": official_title,
+        "phase": trial.phase,
+        "phase_code": phase_code(trial.phase),
+        "overall_status": trial.overall_status,
+        "lead_sponsor": trial.lead_sponsor,
+        "study_type": study_type,
+        "conditions": conditions,
+        "interventions": trial.interventions,
+        "mechanism_labels": candidate_mechanisms,
+        "patient_segment_labels": candidate_segments,
+        "matched_mechanism_labels": matched_mechanisms,
+        "matched_patient_segment_labels": matched_segments,
+        "screen_flags": {
+            "matches_phase_filter": phase_match,
+            "matches_interventional_requirement": interventional_match,
+            "matches_mechanism_filter": bool(matched_mechanisms) if mechanism_filter_requested else True,
+            "matches_patient_segment_filter": bool(matched_segments) if patient_segment_filter_requested else True,
+            "is_terminal_status": terminal_status,
+        },
+        "screen_decision": decision,
+        "decision_reasons": reasons,
+        "source_refs": document_refs_from_models([payload]) if payload else [],
+    }
 
 
 def _velocity_row(trial: dict[str, Any], indication_avg: float | None) -> dict[str, Any] | None:
@@ -1040,6 +1132,232 @@ Use this when you want sponsor and mechanism concentration rather than raw trial
             ),
         ],
         requested_filters={"indication": indication, "phase": phase, "status": status},
+    )
+
+
+@mcp.tool()
+async def screen_trial_candidates(
+    indication: str,
+    phase: str | None = None,
+    mechanism: str | None = None,
+    sponsor: str | None = None,
+    patient_segment: str | None = None,
+    include_terminated: bool = False,
+    allow_combination_phases: bool = False,
+    max_results: int = 30,
+) -> dict[str, Any]:
+    """Deterministic trial screen for narrow, high-precision answer sets.
+
+Use this when the user asks for an exact cohort such as "all phase 3 bispecific antibody trials in advanced NSCLC" and hallucination risk matters more than broad recall.
+
+Only studies listed under `included_trials` should be treated as safe-to-name final answers. `excluded_trials` are returned for auditability and abstention support.
+    """
+    max_results = min(max_results, ANALYSIS_MAX_RESULTS)
+    candidate_trials, details, warnings, queried_sources, evidence_trace = await _collect_trials_and_details(
+        indication=indication,
+        phase=phase,
+        sponsor=sponsor,
+        max_results=max_results,
+        detail_limit=max_results,
+    )
+
+    detail_by_id = {detail.nct_id: detail for detail in details}
+    requested_mechanisms = classify_mechanisms(mechanism) if mechanism else []
+    requested_segments = extract_patient_segments(patient_segment) if patient_segment else []
+    normalized_mechanism = (mechanism or "").strip().casefold()
+    normalized_patient_segment = (patient_segment or "").strip().casefold()
+
+    included_trials: list[dict[str, Any]] = []
+    excluded_trials: list[dict[str, Any]] = []
+    exclusion_counter: Counter[str] = Counter()
+
+    for trial in candidate_trials:
+        detail = detail_by_id.get(trial.nct_id)
+        candidate = detail or trial
+        merged_text = _merged_trial_text(candidate).casefold()
+        candidate_mechanisms = _trial_mechanisms(candidate)
+        candidate_segments = extract_patient_segments(_merged_trial_text(candidate))
+        terminal_status = candidate.overall_status in TERMINAL_STATUSES
+        interventional_match = getattr(candidate, "study_type", None) == "INTERVENTIONAL" if detail is not None else False
+        phase_match = _phase_matches_filter(
+            candidate.phase,
+            phase,
+            allow_combination_phases=allow_combination_phases,
+        )
+
+        matched_mechanisms = []
+        if mechanism:
+            matched_mechanisms = _label_intersection(candidate_mechanisms, requested_mechanisms)
+            if not matched_mechanisms and normalized_mechanism and normalized_mechanism in merged_text:
+                matched_mechanisms = [mechanism.strip()]
+
+        matched_segments = []
+        if patient_segment:
+            matched_segments = _label_intersection(candidate_segments, requested_segments)
+            if not matched_segments and normalized_patient_segment and normalized_patient_segment in merged_text:
+                matched_segments = [patient_segment.strip()]
+
+        exclusion_reasons: list[str] = []
+        if detail is None:
+            exclusion_reasons.append("Excluded because no detailed ClinicalTrials.gov record could be retrieved for deterministic screening.")
+        if phase and not phase_match:
+            exclusion_reasons.append("Excluded because the verified trial phase does not match the requested phase filter.")
+        if detail is not None and not interventional_match:
+            exclusion_reasons.append("Excluded because the verified study type is not interventional.")
+        if mechanism and not matched_mechanisms:
+            exclusion_reasons.append("Excluded because the verified trial text does not support the requested mechanism filter.")
+        if patient_segment and not matched_segments:
+            exclusion_reasons.append("Excluded because the verified trial text does not support the requested patient-segment filter.")
+        if not include_terminated and terminal_status:
+            exclusion_reasons.append("Excluded because the trial has a terminal status and terminal studies were not requested.")
+
+        if exclusion_reasons:
+            row = _trial_screen_row(
+                candidate,
+                candidate_mechanisms=candidate_mechanisms,
+                candidate_segments=candidate_segments,
+                matched_mechanisms=matched_mechanisms,
+                matched_segments=matched_segments,
+                phase_match=phase_match,
+                interventional_match=interventional_match,
+                terminal_status=terminal_status,
+                mechanism_filter_requested=bool(mechanism),
+                patient_segment_filter_requested=bool(patient_segment),
+                decision="excluded",
+                reasons=exclusion_reasons,
+            )
+            excluded_trials.append(row)
+            for reason in exclusion_reasons:
+                exclusion_counter[reason] += 1
+            continue
+
+        inclusion_reasons = [
+            "Included because the trial has a verifiable detailed ClinicalTrials.gov record.",
+            "Included because the verified study type is interventional.",
+        ]
+        if phase:
+            inclusion_reasons.append("Included because the verified trial phase matches the requested phase filter.")
+        if mechanism:
+            inclusion_reasons.append("Included because the verified trial text matches the requested mechanism filter.")
+        if patient_segment:
+            inclusion_reasons.append("Included because the verified trial text matches the requested patient-segment filter.")
+        if not terminal_status:
+            inclusion_reasons.append("Included because the trial status is non-terminal under the current screening settings.")
+        elif include_terminated:
+            inclusion_reasons.append("Included even though the trial status is terminal because terminal studies were explicitly requested.")
+
+        included_trials.append(
+            _trial_screen_row(
+                candidate,
+                candidate_mechanisms=candidate_mechanisms,
+                candidate_segments=candidate_segments,
+                matched_mechanisms=matched_mechanisms,
+                matched_segments=matched_segments,
+                phase_match=phase_match,
+                interventional_match=interventional_match,
+                terminal_status=terminal_status,
+                mechanism_filter_requested=bool(mechanism),
+                patient_segment_filter_requested=bool(patient_segment),
+                decision="included",
+                reasons=inclusion_reasons,
+            )
+        )
+
+    included_trials.sort(
+        key=lambda item: (
+            _trial_status_sort_key(item.get("overall_status")),
+            -phase_rank(item.get("phase")),
+            item.get("nct_id") or "",
+        )
+    )
+    excluded_trials.sort(
+        key=lambda item: (
+            _trial_status_sort_key(item.get("overall_status")),
+            -phase_rank(item.get("phase")),
+            item.get("nct_id") or "",
+        )
+    )
+
+    result = {
+        "screen_type": "deterministic_trial_candidate_screen",
+        "decision_policy": {
+            "high_precision_mode": True,
+            "safe_answer_field": "included_trials",
+            "exclude_terminal_by_default": not include_terminated,
+            "requires_detail_verification": True,
+            "notes": [
+                "Only studies listed under `included_trials` should be named in a final answer unless the user explicitly asks about exclusions.",
+                "Excluded trials are returned to support abstention and transparent auditing rather than broad narrative synthesis.",
+            ],
+        },
+        "filters": {
+            "indication": indication,
+            "phase": phase,
+            "mechanism": mechanism,
+            "sponsor": sponsor,
+            "patient_segment": patient_segment,
+            "include_terminated": include_terminated,
+            "allow_combination_phases": allow_combination_phases,
+            "max_results": max_results,
+        },
+        "summary": {
+            "candidate_count": len(candidate_trials),
+            "detailed_candidate_count": len(details),
+            "included_count": len(included_trials),
+            "excluded_count": len(excluded_trials),
+        },
+        "included_trials": included_trials,
+        "excluded_trials": excluded_trials,
+        "excluded_reason_counts": [
+            {"reason": reason, "count": count}
+            for reason, count in exclusion_counter.most_common()
+        ],
+    }
+
+    if not included_trials:
+        result["abstention_note"] = (
+            "No trials satisfied all deterministic screening criteria. Prefer stating that no verifiable matches were found rather than broadening the answer implicitly."
+        )
+
+    return detail_response(
+        tool_name="screen_trial_candidates",
+        data_type="trial_candidate_screen",
+        item=result,
+        quality_note="This tool is intentionally conservative. It is designed to reduce hallucinations by requiring detailed trial verification and returning explicit inclusion and exclusion reasons before an attached LLM writes prose.",
+        coverage="ClinicalTrials.gov trial-search rows plus detailed records for deterministic screening against the requested filters.",
+        queried_sources=queried_sources,
+        warnings=warnings,
+        evidence_sources=queried_sources,
+        evidence_trace=[
+            *evidence_trace,
+            _trace_step(
+                "screen_trial_candidates",
+                sources=queried_sources,
+                note="Applied deterministic inclusion and exclusion rules to the verified trial detail set and separated answer-safe included trials from audit-only exclusions.",
+                filters={
+                    "indication": indication,
+                    "phase": phase,
+                    "mechanism": mechanism,
+                    "sponsor": sponsor,
+                    "patient_segment": patient_segment,
+                    "include_terminated": include_terminated,
+                    "allow_combination_phases": allow_combination_phases,
+                    "max_results": max_results,
+                },
+                output_kind="derived",
+                refs={"included_trials": included_trials, "excluded_trials": excluded_trials},
+            ),
+        ],
+        requested_filters={
+            "indication": indication,
+            "phase": phase,
+            "mechanism": mechanism,
+            "sponsor": sponsor,
+            "patient_segment": patient_segment,
+            "include_terminated": include_terminated,
+            "allow_combination_phases": allow_combination_phases,
+            "max_results": max_results,
+        },
     )
 
 

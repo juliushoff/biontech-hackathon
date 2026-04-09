@@ -29,6 +29,7 @@ from Medical_Wizard_MCP.tools.intelligence import (
     get_trial_density,
     investigator_site_landscape,
     link_trial_evidence,
+    screen_trial_candidates,
     suggest_patient_profile,
     suggest_trial_design,
     summarize_safety_signals,
@@ -589,6 +590,159 @@ async def test_link_trial_evidence_uses_trial_titles_for_publication_and_preprin
     assert response["result"]["evidence_summary"]["preprint_count"] == 1
     assert response["result"]["queries_used"]["publication_queries"][0] == "ROSETTA-Lung"
     assert response["result"]["queries_used"]["preprint_queries"][0] == "ROSETTA-Lung"
+
+
+@pytest.mark.asyncio
+async def test_screen_trial_candidates_returns_included_and_excluded_sets_with_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    included_trial = TrialSummary(
+        source="clinicaltrials_gov",
+        nct_id="NCT10000001",
+        brief_title="Amivantamab in advanced metastatic NSCLC",
+        phase="Phase 3",
+        overall_status="RECRUITING",
+        lead_sponsor="Janssen",
+        interventions=["amivantamab", "lazertinib"],
+        primary_outcomes=["Overall survival"],
+        enrollment_count=500,
+    )
+    observational_trial = TrialSummary(
+        source="clinicaltrials_gov",
+        nct_id="NCT10000002",
+        brief_title="Observational bispecific registry in advanced NSCLC",
+        phase="Phase 3",
+        overall_status="RECRUITING",
+        lead_sponsor="Example Sponsor",
+        interventions=["bispecific antibody"],
+        primary_outcomes=["Real-world outcomes"],
+        enrollment_count=200,
+    )
+    terminated_trial = TrialSummary(
+        source="clinicaltrials_gov",
+        nct_id="NCT10000003",
+        brief_title="Bispecific antibody in advanced NSCLC",
+        phase="Phase 3",
+        overall_status="TERMINATED",
+        lead_sponsor="Example Sponsor",
+        interventions=["bispecific antibody"],
+        primary_outcomes=["Progression-free survival"],
+        enrollment_count=180,
+    )
+    phase_mismatch_trial = TrialSummary(
+        source="clinicaltrials_gov",
+        nct_id="NCT10000004",
+        brief_title="Bispecific antibody in advanced NSCLC",
+        phase="Phase 2/Phase 3",
+        overall_status="RECRUITING",
+        lead_sponsor="Example Sponsor",
+        interventions=["bispecific antibody"],
+        primary_outcomes=["Objective response rate"],
+        enrollment_count=220,
+    )
+    non_bispecific_trial = TrialSummary(
+        source="clinicaltrials_gov",
+        nct_id="NCT10000005",
+        brief_title="Pembrolizumab in advanced NSCLC",
+        phase="Phase 3",
+        overall_status="RECRUITING",
+        lead_sponsor="Merck",
+        interventions=["pembrolizumab"],
+        primary_outcomes=["Overall survival"],
+        enrollment_count=450,
+    )
+
+    detail_map = {
+        "NCT10000001": TrialDetail(
+            **included_trial.model_dump(),
+            official_title="A phase 3 study of amivantamab in advanced or metastatic NSCLC",
+            eligibility_criteria="Adults with advanced or metastatic NSCLC.",
+            arms=["Amivantamab arm", "Standard of care arm"],
+            secondary_outcomes=["Progression-free survival"],
+            study_type="INTERVENTIONAL",
+            conditions=["NSCLC"],
+        ),
+        "NCT10000002": TrialDetail(
+            **observational_trial.model_dump(),
+            official_title="An observational study of bispecific antibody use in advanced NSCLC",
+            eligibility_criteria="Adults with advanced NSCLC.",
+            arms=["Observational cohort"],
+            secondary_outcomes=["Treatment patterns"],
+            study_type="OBSERVATIONAL",
+            conditions=["NSCLC"],
+        ),
+        "NCT10000003": TrialDetail(
+            **terminated_trial.model_dump(),
+            official_title="A phase 3 study of a bispecific antibody in advanced NSCLC",
+            eligibility_criteria="Adults with advanced or metastatic NSCLC.",
+            arms=["Bispecific arm", "Chemotherapy arm"],
+            secondary_outcomes=["Overall survival"],
+            study_type="INTERVENTIONAL",
+            conditions=["NSCLC"],
+        ),
+        "NCT10000004": TrialDetail(
+            **phase_mismatch_trial.model_dump(),
+            official_title="A phase 2/3 study of a bispecific antibody in advanced NSCLC",
+            eligibility_criteria="Adults with advanced or metastatic NSCLC.",
+            arms=["Bispecific arm", "Standard of care arm"],
+            secondary_outcomes=["Overall survival"],
+            study_type="INTERVENTIONAL",
+            conditions=["NSCLC"],
+        ),
+        "NCT10000005": TrialDetail(
+            **non_bispecific_trial.model_dump(),
+            official_title="A phase 3 study of pembrolizumab in advanced NSCLC",
+            eligibility_criteria="Adults with advanced or metastatic NSCLC.",
+            arms=["Pembrolizumab arm", "Chemotherapy arm"],
+            secondary_outcomes=["Progression-free survival"],
+            study_type="INTERVENTIONAL",
+            conditions=["NSCLC"],
+        ),
+    }
+
+    async def fake_search_trials(**_: object) -> ListQueryResult[TrialSummary]:
+        return ListQueryResult(
+            queried_sources=["clinicaltrials_gov"],
+            warnings=[],
+            items=[
+                included_trial,
+                observational_trial,
+                terminated_trial,
+                phase_mismatch_trial,
+                non_bispecific_trial,
+            ],
+        )
+
+    async def fake_get_trial_details(nct_id: str) -> DetailQueryResult[TrialDetail]:
+        return DetailQueryResult(
+            item=detail_map.get(nct_id),
+            queried_sources=["clinicaltrials_gov"],
+            warnings=[],
+        )
+
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_trials", fake_search_trials)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.get_trial_details", fake_get_trial_details)
+
+    response = await screen_trial_candidates(
+        indication="NSCLC",
+        phase="PHASE3",
+        mechanism="bispecific antibody",
+        patient_segment="advanced metastatic NSCLC",
+    )
+
+    assert response["result"]["summary"]["candidate_count"] == 5
+    assert response["result"]["summary"]["included_count"] == 1
+    assert response["result"]["summary"]["excluded_count"] == 4
+    assert response["result"]["included_trials"][0]["nct_id"] == "NCT10000001"
+    assert response["result"]["included_trials"][0]["matched_mechanism_labels"] == ["bispecific antibody"]
+    assert response["result"]["included_trials"][0]["source_refs"][0]["id"] == "NCT10000001"
+    excluded_by_id = {item["nct_id"]: item for item in response["result"]["excluded_trials"]}
+    assert "not interventional" in " ".join(excluded_by_id["NCT10000002"]["decision_reasons"]).lower()
+    assert "terminal status" in " ".join(excluded_by_id["NCT10000003"]["decision_reasons"]).lower()
+    assert "phase" in " ".join(excluded_by_id["NCT10000004"]["decision_reasons"]).lower()
+    assert "mechanism" in " ".join(excluded_by_id["NCT10000005"]["decision_reasons"]).lower()
+    assert response["_meta"]["evidence_trace"][-1]["step"] == "screen_trial_candidates"
+    assert any(ref["id"] == "NCT10000001" for ref in response["_meta"]["evidence_refs"])
 
 
 @pytest.mark.asyncio
