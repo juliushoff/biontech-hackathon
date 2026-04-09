@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..models import ConferenceAbstract, Publication, TrialDetail, TrialSummary
-from ..app import mcp
+from .._mcp import mcp
 from ..sources import registry
 from ._evidence_refs import document_refs_from_models
 from ._evidence_quality import annotate_evidence_quality, summarize_evidence_quality
@@ -348,6 +348,10 @@ def _label_intersection(candidate_labels: list[str], requested_labels: list[str]
         if label and label.casefold() in requested_lookup and label not in matches:
             matches.append(label)
     return matches
+
+
+def _specific_candidate_labels(labels: list[str]) -> list[str]:
+    return [label for label in labels if label and label != "other / unspecified"]
 
 
 def _trial_screen_row(
@@ -1176,7 +1180,7 @@ async def screen_trial_candidates(
 
 Use this when the user asks for an exact cohort such as "all phase 3 bispecific antibody trials in advanced NSCLC" and hallucination risk matters more than broad recall.
 
-Only studies listed under `included_trials` should be treated as safe-to-name final answers. `excluded_trials` are returned for auditability and abstention support.
+Only studies listed under `included_trials` should be treated as safe-to-name final answers. `related_trials` surface plausible but not fully verified matches, while `excluded_trials` remain the audit trail for clear non-matches.
     """
     max_results = min(max_results, ANALYSIS_MAX_RESULTS)
     candidate_trials, details, warnings, queried_sources, evidence_trace = await _collect_trials_and_details(
@@ -1194,6 +1198,7 @@ Only studies listed under `included_trials` should be treated as safe-to-name fi
     normalized_patient_segment = (patient_segment or "").strip().casefold()
 
     included_trials: list[dict[str, Any]] = []
+    related_trials: list[dict[str, Any]] = []
     excluded_trials: list[dict[str, Any]] = []
     exclusion_counter: Counter[str] = Counter()
 
@@ -1216,6 +1221,7 @@ Only studies listed under `included_trials` should be treated as safe-to-name fi
             matched_mechanisms = _label_intersection(candidate_mechanisms, requested_mechanisms)
             if not matched_mechanisms and normalized_mechanism and normalized_mechanism in merged_text:
                 matched_mechanisms = [mechanism.strip()]
+        mechanism_conflict = bool(mechanism) and bool(_specific_candidate_labels(candidate_mechanisms)) and not matched_mechanisms
 
         matched_segments = []
         if patient_segment:
@@ -1224,16 +1230,12 @@ Only studies listed under `included_trials` should be treated as safe-to-name fi
                 matched_segments = [patient_segment.strip()]
 
         exclusion_reasons: list[str] = []
-        if detail is None:
-            exclusion_reasons.append("Excluded because no detailed ClinicalTrials.gov record could be retrieved for deterministic screening.")
         if phase and not phase_match:
             exclusion_reasons.append("Excluded because the verified trial phase does not match the requested phase filter.")
         if detail is not None and not interventional_match:
             exclusion_reasons.append("Excluded because the verified study type is not interventional.")
-        if mechanism and not matched_mechanisms:
+        if mechanism_conflict:
             exclusion_reasons.append("Excluded because the verified trial text does not support the requested mechanism filter.")
-        if patient_segment and not matched_segments:
-            exclusion_reasons.append("Excluded because the verified trial text does not support the requested patient-segment filter.")
         if not include_terminated and terminal_status:
             exclusion_reasons.append("Excluded because the trial has a terminal status and terminal studies were not requested.")
 
@@ -1255,6 +1257,39 @@ Only studies listed under `included_trials` should be treated as safe-to-name fi
             excluded_trials.append(row)
             for reason in exclusion_reasons:
                 exclusion_counter[reason] += 1
+            continue
+
+        related_reasons: list[str] = []
+        if detail is None:
+            related_reasons.append(
+                "Related because the registry row looks relevant, but no detailed ClinicalTrials.gov record was available for full verification."
+            )
+        if mechanism and not matched_mechanisms and not mechanism_conflict:
+            related_reasons.append(
+                "Related because the available trial text does not clearly confirm the requested mechanism filter."
+            )
+        if patient_segment and not matched_segments:
+            related_reasons.append(
+                "Related because the available trial text does not clearly confirm the requested patient-segment filter."
+            )
+
+        if related_reasons:
+            related_trials.append(
+                _trial_screen_row(
+                    candidate,
+                    candidate_mechanisms=candidate_mechanisms,
+                    candidate_segments=candidate_segments,
+                    matched_mechanisms=matched_mechanisms,
+                    matched_segments=matched_segments,
+                    phase_match=phase_match,
+                    interventional_match=interventional_match,
+                    terminal_status=terminal_status,
+                    mechanism_filter_requested=bool(mechanism),
+                    patient_segment_filter_requested=bool(patient_segment),
+                    decision="related",
+                    reasons=related_reasons,
+                )
+            )
             continue
 
         inclusion_reasons = [
@@ -1296,6 +1331,13 @@ Only studies listed under `included_trials` should be treated as safe-to-name fi
             item.get("nct_id") or "",
         )
     )
+    related_trials.sort(
+        key=lambda item: (
+            _trial_status_sort_key(item.get("overall_status")),
+            -phase_rank(item.get("phase")),
+            item.get("nct_id") or "",
+        )
+    )
     excluded_trials.sort(
         key=lambda item: (
             _trial_status_sort_key(item.get("overall_status")),
@@ -1308,11 +1350,14 @@ Only studies listed under `included_trials` should be treated as safe-to-name fi
         "screen_type": "deterministic_trial_candidate_screen",
         "decision_policy": {
             "high_precision_mode": True,
+            "balanced_recall_mode": True,
             "safe_answer_field": "included_trials",
+            "secondary_answer_field": "related_trials",
             "exclude_terminal_by_default": not include_terminated,
             "requires_detail_verification": True,
             "notes": [
-                "Only studies listed under `included_trials` should be named in a final answer unless the user explicitly asks about exclusions.",
+                "Only studies listed under `included_trials` should be named in a final answer unless the user explicitly asks for broader candidates.",
+                "Studies under `related_trials` may be relevant but need follow-up because one or more requested filters could not be fully verified from the available text.",
                 "Excluded trials are returned to support abstention and transparent auditing rather than broad narrative synthesis.",
             ],
         },
@@ -1330,9 +1375,11 @@ Only studies listed under `included_trials` should be treated as safe-to-name fi
             "candidate_count": len(candidate_trials),
             "detailed_candidate_count": len(details),
             "included_count": len(included_trials),
+            "related_count": len(related_trials),
             "excluded_count": len(excluded_trials),
         },
         "included_trials": included_trials,
+        "related_trials": related_trials,
         "excluded_trials": excluded_trials,
         "excluded_reason_counts": [
             {"reason": reason, "count": count}
@@ -1341,15 +1388,20 @@ Only studies listed under `included_trials` should be treated as safe-to-name fi
     }
 
     if not included_trials:
-        result["abstention_note"] = (
-            "No trials satisfied all deterministic screening criteria. Prefer stating that no verifiable matches were found rather than broadening the answer implicitly."
-        )
+        if related_trials:
+            result["abstention_note"] = (
+                "No trials satisfied all deterministic inclusion criteria. Prefer describing `related_trials` as plausible candidates that still need confirmation rather than presenting them as verified matches."
+            )
+        else:
+            result["abstention_note"] = (
+                "No trials satisfied all deterministic screening criteria. Prefer stating that no verifiable matches were found rather than broadening the answer implicitly."
+            )
 
     return detail_response(
         tool_name="screen_trial_candidates",
         data_type="trial_candidate_screen",
         item=result,
-        quality_note="This tool is intentionally conservative. It is designed to reduce hallucinations by requiring detailed trial verification and returning explicit inclusion and exclusion reasons before an attached LLM writes prose.",
+        quality_note="This tool keeps a conservative included set for answer-safe trial naming, but it now also surfaces related candidates when the available evidence looks relevant without fully satisfying every verification step.",
         coverage="ClinicalTrials.gov trial-search rows plus detailed records for deterministic screening against the requested filters.",
         queried_sources=queried_sources,
         warnings=warnings,
@@ -1371,7 +1423,7 @@ Only studies listed under `included_trials` should be treated as safe-to-name fi
                     "max_results": max_results,
                 },
                 output_kind="derived",
-                refs={"included_trials": included_trials, "excluded_trials": excluded_trials},
+                refs={"included_trials": included_trials, "related_trials": related_trials, "excluded_trials": excluded_trials},
             ),
         ],
         requested_filters={

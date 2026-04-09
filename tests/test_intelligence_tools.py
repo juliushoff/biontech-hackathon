@@ -668,6 +668,17 @@ async def test_screen_trial_candidates_returns_included_and_excluded_sets_with_r
         primary_outcomes=["Overall survival"],
         enrollment_count=450,
     )
+    ambiguous_trial = TrialSummary(
+        source="clinicaltrials_gov",
+        nct_id="NCT10000006",
+        brief_title="Novel antibody therapy in advanced metastatic NSCLC",
+        phase="Phase 3",
+        overall_status="RECRUITING",
+        lead_sponsor="Example Sponsor",
+        interventions=["experimental antibody therapy"],
+        primary_outcomes=["Overall survival"],
+        enrollment_count=150,
+    )
 
     detail_map = {
         "NCT10000001": TrialDetail(
@@ -727,6 +738,7 @@ async def test_screen_trial_candidates_returns_included_and_excluded_sets_with_r
                 terminated_trial,
                 phase_mismatch_trial,
                 non_bispecific_trial,
+                ambiguous_trial,
             ],
         )
 
@@ -747,12 +759,17 @@ async def test_screen_trial_candidates_returns_included_and_excluded_sets_with_r
         patient_segment="advanced metastatic NSCLC",
     )
 
-    assert response["result"]["summary"]["candidate_count"] == 5
+    assert response["result"]["summary"]["candidate_count"] == 6
     assert response["result"]["summary"]["included_count"] == 1
+    assert response["result"]["summary"]["related_count"] == 1
     assert response["result"]["summary"]["excluded_count"] == 4
     assert response["result"]["included_trials"][0]["nct_id"] == "NCT10000001"
     assert response["result"]["included_trials"][0]["matched_mechanism_labels"] == ["bispecific antibody"]
     assert response["result"]["included_trials"][0]["source_refs"][0]["id"] == "NCT10000001"
+    assert response["result"]["related_trials"][0]["nct_id"] == "NCT10000006"
+    assert "does not clearly confirm the requested mechanism filter" in " ".join(
+        response["result"]["related_trials"][0]["decision_reasons"]
+    ).lower()
     excluded_by_id = {item["nct_id"]: item for item in response["result"]["excluded_trials"]}
     assert "not interventional" in " ".join(excluded_by_id["NCT10000002"]["decision_reasons"]).lower()
     assert "terminal status" in " ".join(excluded_by_id["NCT10000003"]["decision_reasons"]).lower()

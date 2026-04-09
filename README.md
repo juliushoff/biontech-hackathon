@@ -9,7 +9,7 @@ The project is intentionally LLM-first:
 
 `README.md` is the canonical human-facing setup, usage, and testing document. `AGENTS.md` contains repo-specific guidance for coding agents only.
 
-## Table of Contents
+## Table of Contents 
 
 1. [Overview](#overview)
 2. [Architecture](#architecture)
@@ -430,12 +430,13 @@ It:
 - starts from registry candidates for the requested indication and optional phase / sponsor filters
 - resolves detailed ClinicalTrials.gov records before making inclusion decisions
 - applies deterministic include/exclude checks for study type, phase, mechanism, patient segment, and terminal status handling
-- returns both `included_trials` and `excluded_trials` with explicit decision reasons
+- returns `included_trials`, `related_trials`, and `excluded_trials` with explicit decision reasons
 
 Important usage guidance:
 - only studies under `included_trials` should be named in a final answer by an attached LLM
+- `related_trials` are plausible candidates that were not fully confirmed against all requested filters and should be presented as follow-up leads, not as verified matches
 - `excluded_trials` are meant for auditability, abstention, and explaining why borderline candidates were left out
-- the tool is intentionally conservative and may omit borderline candidates rather than guess
+- the tool is still conservative for final naming, but it now exposes borderline candidates instead of hiding them completely
 
 #### `search_conference_abstracts`
 
@@ -443,7 +444,8 @@ Conference retrieval currently:
 - uses `Europe PMC`
 - normalizes conference series for `ASCO`, `AACR`, `ESMO`, and `SITC`
 - ranks results with transparent `conference_result_score`
-- filters out weak records below `minimum_conference_result_score`
+- labels returned results as stronger or merely related via `conference_match_strength`
+- keeps broader related matches above a permissive floor instead of only returning the strict top bucket
 
 This is meant for early-signal scouting, not as a substitute for full journal evidence.
 
@@ -647,7 +649,7 @@ uv run pytest
 ## Current Limitations
 
 - `link_trial_evidence` is still query-based association, not exact citation graph resolution.
-- `screen_trial_candidates` is intentionally conservative and may under-call borderline candidates when the verified detail text is ambiguous.
+- `screen_trial_candidates` keeps final-answer naming conservative, but `related_trials` may still require manual review when the verified detail text is ambiguous.
 - `track_indication_changes` is based on current retrievable records and date filtering, not persisted historical snapshots.
 - Audit tools only operate on directly available text such as registry fields, abstracts, and labels.
 - Conference retrieval is useful but inherently noisier than PubMed literature search.

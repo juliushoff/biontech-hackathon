@@ -180,7 +180,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
             "You only need peer-reviewed literature and do not want conference-stage evidence.",
             "You want a full cross-source asset brief rather than conference evidence only.",
         ],
-        "decision_boundary": "Use this only for conference-stage evidence. If the user wants journal records call search_publications; for preprints call search_preprints; for an asset-centric bundle call asset_dossier.",
+        "decision_boundary": "Use this only for conference-stage evidence. The tool now returns both strong and related conference matches, so downstream summaries should distinguish clearly supported abstracts from broader query-adjacent signals. If the user wants journal records call search_publications; for preprints call search_preprints; for an asset-centric bundle call asset_dossier.",
         "choose_instead_of": ["search_publications", "search_preprints", "asset_dossier"],
         "typical_next_tools": [
             "search_publications",
@@ -427,7 +427,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
             "You are still exploring broadly and do not yet know the exact filters that matter.",
             "You need a lightweight landscape summary rather than an auditable include/exclude screen.",
         ],
-        "decision_boundary": "Use this instead of free-form trial synthesis when the final answer should only name trials that pass deterministic screening against verified detail records. Only studies under `included_trials` should be treated as answer-safe.",
+        "decision_boundary": "Use this instead of free-form trial synthesis when the final answer should only name trials that pass deterministic screening against verified detail records. Only studies under `included_trials` should be treated as answer-safe; `related_trials` are broader candidates that still need confirmation.",
         "choose_instead_of": ["search_trials", "competitive_landscape", "track_competitor_assets"],
         "typical_next_tools": [
             "get_trial_details",

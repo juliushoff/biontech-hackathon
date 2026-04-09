@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..app import mcp
+from .._mcp import mcp
 from ..sources import registry
 from ..sources._conference_utils import normalize_conference_series
 from ._evidence_quality import annotate_evidence_quality
@@ -38,7 +38,8 @@ _LOW_SIGNAL_PATTERNS = (
     re.compile(r"\bsummary\b", re.I),
 )
 
-MIN_CONFERENCE_RESULT_SCORE = 0.55
+MIN_CONFERENCE_RESULT_SCORE = 0.35
+STRONG_CONFERENCE_RESULT_SCORE = 0.55
 
 
 def _clamp_score(value: float) -> float:
@@ -109,6 +110,14 @@ def _conference_result_fields(
         "conference_result_score": _clamp_score(score),
         "conference_result_reason": " ".join(reasons) or "Conference ranking fell back to a neutral baseline.",
     }
+
+
+def _conference_match_strength(score: float) -> str:
+    if score >= STRONG_CONFERENCE_RESULT_SCORE:
+        return "strong"
+    if score >= MIN_CONFERENCE_RESULT_SCORE:
+        return "related"
+    return "weak"
 
 
 @mcp.tool()
@@ -188,6 +197,9 @@ Avoid this when the user explicitly needs peer-reviewed journal literature first
                 requested_series=resolved_series,
             )
         )
+        enriched["conference_match_strength"] = _conference_match_strength(
+            float(enriched.get("conference_result_score", 0))
+        )
         ranked_payload.append((index, enriched))
     ranked_payload.sort(
         key=lambda pair: (
@@ -227,11 +239,12 @@ Avoid this when the user explicitly needs peer-reviewed journal literature first
             {
                 "step": "rank_conference_results",
                 "sources": response.queried_sources,
-                "note": "Ranked conference results using conference-artifact signals, query overlap, source quality hints, and penalties for low-signal commentary-like records.",
+                "note": "Ranked conference results using conference-artifact signals, query overlap, source quality hints, and penalties for low-signal commentary-like records, then kept both strong and related matches above the broad-return threshold.",
                 "filters": {
                     "effective_query": effective_query,
                     "conference_series": resolved_series,
                     "minimum_score": MIN_CONFERENCE_RESULT_SCORE,
+                    "strong_match_score": STRONG_CONFERENCE_RESULT_SCORE,
                     "returned_results": max_results,
                 },
                 "output_kind": "derived",
@@ -245,5 +258,6 @@ Avoid this when the user explicitly needs peer-reviewed journal literature first
             "max_results": max_results,
             "registry_max_results": registry_max_results,
             "minimum_conference_result_score": MIN_CONFERENCE_RESULT_SCORE,
+            "strong_conference_result_score": STRONG_CONFERENCE_RESULT_SCORE,
         },
     )
