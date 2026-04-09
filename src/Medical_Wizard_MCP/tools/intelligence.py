@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
-from ..models import Publication, TrialDetail, TrialSummary
+from ..models import ConferenceAbstract, Publication, TrialDetail, TrialSummary
 from ..app import mcp
 from ..sources import registry
 from ._evidence_quality import annotate_evidence_quality, summarize_evidence_quality
@@ -37,6 +37,23 @@ from ._responses import detail_response, list_response
 
 ANALYSIS_MAX_RESULTS = 100
 DETAIL_SAMPLE_SIZE = 8
+MAX_DOSSIER_QUERY_VARIANTS = 6
+
+BURDEN_SITE_HINTS = {
+    "nsclc": "Lung",
+    "non-small cell lung cancer": "Lung",
+    "sclc": "Lung",
+    "small cell lung cancer": "Lung",
+    "lung cancer": "Lung",
+    "gbm": "Central Nervous system",
+    "glioblastoma": "Central Nervous system",
+    "glioblastoma multiforme": "Central Nervous system",
+    "brain cancer": "Central Nervous system",
+    "breast cancer": "Breast",
+    "pancreatic cancer": "Pancreas",
+    "pancreas cancer": "Pancreas",
+    "colorectal cancer": "Colon, rectum, anus",
+}
 
 
 def _warning_dicts(*warning_lists: list[Any]) -> list[dict[str, str]]:
@@ -93,6 +110,10 @@ def _clean_query_text(value: str | None) -> str:
     return " ".join(value.split()) if isinstance(value, str) and value.strip() else ""
 
 
+def _clean_lower_text(value: str | None) -> str:
+    return _clean_query_text(value).lower()
+
+
 def _dedupe_publications(items: list[Publication]) -> list[Publication]:
     deduped: dict[str, Publication] = {}
     ordered_keys: list[str] = []
@@ -110,6 +131,38 @@ def _dedupe_publications(items: list[Publication]) -> list[Publication]:
             deduped[key] = item
 
     return [deduped[key] for key in ordered_keys]
+
+
+def _dedupe_conference_abstracts(items: list[ConferenceAbstract]) -> list[ConferenceAbstract]:
+    deduped: dict[str, ConferenceAbstract] = {}
+    ordered_keys: list[str] = []
+
+    for item in items:
+        key = (
+            _clean_query_text(item.source_id)
+            or _clean_lower_text(item.doi)
+            or _clean_lower_text(item.title)
+        )
+        if not key:
+            continue
+        if key not in deduped:
+            ordered_keys.append(key)
+            deduped[key] = item
+
+    return [deduped[key] for key in ordered_keys]
+
+
+def _burden_site_hint(indication: str) -> str:
+    cleaned = _clean_query_text(indication)
+    lowered = cleaned.casefold()
+    if lowered in BURDEN_SITE_HINTS:
+        return BURDEN_SITE_HINTS[lowered]
+    for suffix in (" cancer", " tumour", " tumor"):
+        if lowered.endswith(suffix):
+            trimmed = cleaned[: -len(suffix)].strip()
+            if trimmed:
+                return trimmed
+    return cleaned
 
 
 def _build_trial_evidence_queries(trial: TrialDetail) -> tuple[list[str], list[str]]:
@@ -167,6 +220,31 @@ async def _collect_publication_matches(
         warnings.extend(_warning_dicts(response.warnings))
 
     return _dedupe_publications(items), sorted(set(queried_sources)), warnings
+
+
+async def _collect_conference_matches(
+    queries: list[str],
+    *,
+    year_from: int | None,
+    max_results_per_query: int,
+    conference_series: list[str] | None = None,
+) -> tuple[list[ConferenceAbstract], list[str], list[dict[str, str]]]:
+    items: list[ConferenceAbstract] = []
+    queried_sources: list[str] = []
+    warnings: list[dict[str, str]] = []
+
+    for query in queries:
+        response = await registry.search_conference_abstracts(
+            query=query,
+            conference_series=conference_series,
+            max_results=max_results_per_query,
+            year_from=year_from,
+        )
+        items.extend(response.items)
+        queried_sources.extend(response.queried_sources)
+        warnings.extend(_warning_dicts(response.warnings))
+
+    return _dedupe_conference_abstracts(items), sorted(set(queried_sources)), warnings
 
 
 def _trial_mechanisms(trial: TrialSummary | TrialDetail | dict[str, Any]) -> list[str]:
@@ -350,6 +428,115 @@ def _normalize_asset_name(intervention: str) -> str:
     if lowered in {"placebo", "standard of care", "best supportive care"}:
         return ""
     return value
+
+
+def _asset_dossier_queries(
+    *,
+    asset: str,
+    indication: str | None,
+    trials: list[TrialSummary],
+    details: list[TrialDetail],
+) -> tuple[list[str], list[str], list[str]]:
+    base_query = " ".join(part for part in [asset, indication] if part).strip()
+    publication_queries = unique_nonempty([base_query, asset])
+    preprint_queries = unique_nonempty([base_query, asset])
+    conference_queries = unique_nonempty([base_query, asset])
+
+    for trial in details[:DETAIL_SAMPLE_SIZE]:
+        trial_publication_queries, trial_preprint_queries = _build_trial_evidence_queries(trial)
+        publication_queries.extend(trial_publication_queries[:2])
+        preprint_queries.extend(trial_preprint_queries[:2])
+        conference_queries.extend(
+            query
+            for query in [
+                trial.brief_title,
+                trial.official_title,
+                " ".join(
+                    part
+                    for part in [trial.interventions[0] if trial.interventions else "", indication or ""]
+                    if part
+                ).strip(),
+            ]
+            if query
+        )
+
+    conference_queries.extend(trial.brief_title for trial in trials[:3] if trial.brief_title)
+
+    return (
+        unique_nonempty(publication_queries)[:MAX_DOSSIER_QUERY_VARIANTS],
+        unique_nonempty(preprint_queries)[:MAX_DOSSIER_QUERY_VARIANTS],
+        unique_nonempty(conference_queries)[:MAX_DOSSIER_QUERY_VARIANTS],
+    )
+
+
+def _top_sponsor_rows(trials: list[TrialSummary], *, limit: int = 5) -> list[dict[str, Any]]:
+    return [
+        {"sponsor": sponsor, "trial_count": count}
+        for sponsor, count in Counter(
+            trial.lead_sponsor or "Unknown"
+            for trial in trials
+        ).most_common(limit)
+    ]
+
+
+def _top_mechanism_rows(trials: list[TrialSummary], *, limit: int = 6) -> list[dict[str, Any]]:
+    mechanism_counter: Counter[str] = Counter()
+    for trial in trials:
+        for mechanism in _trial_mechanisms(trial):
+            mechanism_counter[mechanism] += 1
+    return [
+        {"mechanism": mechanism, "trial_count": count}
+        for mechanism, count in mechanism_counter.most_common(limit)
+    ]
+
+
+def _country_gap_signal(score: float, visible_trials: int) -> str:
+    if score >= 0.6 and visible_trials <= 1:
+        return "HIGH"
+    if score >= 0.4:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _safe_round(value: float | None, digits: int = 1) -> float | None:
+    if value is None:
+        return None
+    return round(value, digits)
+
+
+def _clamp_score(value: float) -> float:
+    return round(min(max(value, 0.05), 0.99), 2)
+
+
+def _opportunity_tier(score: float) -> str:
+    if score >= 0.75:
+        return "HIGH"
+    if score >= 0.5:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _medication_gap_score(approved_drug_count: int) -> float:
+    pressure = min(max(approved_drug_count, 0) / 8, 1.0)
+    return _clamp_score(1.0 - pressure)
+
+
+def _competition_whitespace_score(*, active_trial_count: int, unique_sponsors: int, total_trial_count: int) -> float:
+    pressure = (
+        min(max(active_trial_count, 0) / 20, 1.0) * 0.55
+        + min(max(unique_sponsors, 0) / 10, 1.0) * 0.30
+        + min(max(total_trial_count, 0) / 30, 1.0) * 0.15
+    )
+    return _clamp_score(1.0 - pressure)
+
+
+def _burden_scale_score(*, total_cases: float, average_burden_per_100k: float | None, affected_country_count: int) -> float:
+    score = (
+        0.55 * min(max(total_cases, 0.0) / 50000, 1.0)
+        + 0.30 * min(max(average_burden_per_100k or 0.0, 0.0) / 60, 1.0)
+        + 0.15 * min(max(affected_country_count, 0) / 10, 1.0)
+    )
+    return _clamp_score(score)
 
 
 def _design_archetype(detail: TrialDetail) -> str:
@@ -1842,6 +2029,746 @@ async def track_competitor_assets(
             ),
         ],
         requested_filters={"indication": indication, "sponsors": sponsors or [], "mechanism": mechanism},
+    )
+
+
+@mcp.tool()
+async def burden_vs_trial_footprint(
+    indication: str,
+    indicator: str = "Mortality",
+    year: int | None = None,
+    phase: str | None = None,
+    sponsor: str | None = None,
+    status: str = "RECRUITING",
+    max_results: int = 10,
+) -> dict[str, Any]:
+    """Cross-source country ranking for burden versus visible clinical-trial footprint.
+
+Use this when you want to identify countries where oncology burden looks high relative to the visible trial-site footprint.
+
+Avoid this when you only need raw burden rows or raw trial/site data without the cross-source comparison.
+    """
+    max_results = min(max_results, 25)
+    burden_site = _burden_site_hint(indication)
+    burden_response = await registry.search_oncology_burden(
+        site=burden_site,
+        indicator=indicator,
+        year=year,
+        max_results=100,
+    )
+    _, details, trial_warnings, trial_sources, trial_trace = await _collect_trials_and_details(
+        indication=indication,
+        phase=phase,
+        status=status,
+        sponsor=sponsor,
+        detail_limit=40,
+    )
+
+    warnings = _warning_dicts(burden_response.warnings, trial_warnings)
+    queried_sources = sorted(set(burden_response.queried_sources + trial_sources))
+
+    burden_payload = [item.model_dump() for item in burden_response.items]
+    burden_by_country: dict[str, dict[str, Any]] = {}
+    for row in burden_payload:
+        country = _clean_query_text(row.get("country")) or "Unknown"
+        entry = burden_by_country.setdefault(
+            country,
+            {
+                "country": country,
+                "cases": 0.0,
+                "population": 0.0,
+                "row_count": 0,
+                "years": set(),
+                "registries": set(),
+                "reference_burden_rows": [],
+            },
+        )
+        cases = row.get("cases")
+        population = row.get("population")
+        entry["cases"] += float(cases) if isinstance(cases, (int, float)) else 0.0
+        entry["population"] += float(population) if isinstance(population, (int, float)) else 0.0
+        entry["row_count"] += 1
+        if isinstance(row.get("year"), int):
+            entry["years"].add(row["year"])
+        if _clean_query_text(row.get("registry")):
+            entry["registries"].add(str(row["registry"]))
+        if len(entry["reference_burden_rows"]) < 3:
+            entry["reference_burden_rows"].append(row)
+
+    trial_footprint_by_country: dict[str, dict[str, Any]] = {}
+    for detail in details:
+        trial_payload = detail.model_dump()
+        unique_countries = unique_nonempty(detail.location_countries)
+        for country in unique_countries:
+            entry = trial_footprint_by_country.setdefault(
+                country,
+                {
+                    "visible_trials": set(),
+                    "site_mentions": 0,
+                    "sponsors": set(),
+                    "reference_trials": [],
+                },
+            )
+            entry["visible_trials"].add(detail.nct_id)
+            entry["site_mentions"] += detail.location_countries.count(country)
+            if detail.lead_sponsor:
+                entry["sponsors"].add(detail.lead_sponsor)
+            if len(entry["reference_trials"]) < 3:
+                entry["reference_trials"].append(
+                    {
+                        "source": trial_payload["source"],
+                        "nct_id": trial_payload["nct_id"],
+                        "brief_title": trial_payload["brief_title"],
+                        "phase": trial_payload.get("phase"),
+                        "overall_status": trial_payload.get("overall_status"),
+                        "lead_sponsor": trial_payload.get("lead_sponsor"),
+                        "location_countries": trial_payload.get("location_countries", []),
+                    }
+                )
+
+    max_cases = max((entry["cases"] for entry in burden_by_country.values()), default=0.0)
+    max_rate = max(
+        (
+            entry["cases"] / entry["population"] * 100000
+            for entry in burden_by_country.values()
+            if entry["population"] > 0
+        ),
+        default=0.0,
+    )
+
+    country_rankings: list[dict[str, Any]] = []
+    for country, burden_entry in burden_by_country.items():
+        footprint_entry = trial_footprint_by_country.get(
+            country,
+            {"visible_trials": set(), "site_mentions": 0, "sponsors": set(), "reference_trials": []},
+        )
+        visible_trials = len(footprint_entry["visible_trials"])
+        unique_sponsors = len(footprint_entry["sponsors"])
+        burden_per_100k = (
+            burden_entry["cases"] / burden_entry["population"] * 100000
+            if burden_entry["population"] > 0
+            else None
+        )
+        burden_index = 0.0
+        if max_cases > 0:
+            burden_index += 0.65 * (burden_entry["cases"] / max_cases)
+        if burden_per_100k is not None and max_rate > 0:
+            burden_index += 0.35 * (burden_per_100k / max_rate)
+        whitespace_bonus = 0.18 if visible_trials == 0 else 0.08 if visible_trials == 1 else 0.0
+        footprint_penalty = (
+            min(visible_trials, 4) * 0.16
+            + min(footprint_entry["site_mentions"], 8) * 0.04
+            + min(unique_sponsors, 4) * 0.05
+        )
+        footprint_gap_score = max(0.05, min(0.99, burden_index + whitespace_bonus - footprint_penalty))
+        country_rankings.append(
+            {
+                "country": country,
+                "burden_cases": _safe_round(burden_entry["cases"]),
+                "population": _safe_round(burden_entry["population"]),
+                "burden_per_100k": _safe_round(burden_per_100k, 2),
+                "burden_records_considered": burden_entry["row_count"],
+                "years_covered": sorted(burden_entry["years"], reverse=True),
+                "visible_trial_count": visible_trials,
+                "visible_site_mentions": footprint_entry["site_mentions"],
+                "visible_sponsor_count": unique_sponsors,
+                "burden_per_visible_trial": _safe_round(
+                    burden_entry["cases"] / visible_trials if visible_trials else None,
+                    2,
+                ),
+                "footprint_gap_score": round(footprint_gap_score, 2),
+                "opportunity_signal": _country_gap_signal(footprint_gap_score, visible_trials),
+                "reference_burden_rows": burden_entry["reference_burden_rows"],
+                "reference_trials": footprint_entry["reference_trials"],
+            }
+        )
+
+    country_rankings.sort(
+        key=lambda item: (
+            -float(item["footprint_gap_score"]),
+            -(item.get("burden_cases") or 0),
+            item["country"],
+        )
+    )
+
+    result = {
+        "analysis_type": "cross_source_burden_vs_trial_footprint",
+        "indication": indication,
+        "burden_site_used": burden_site,
+        "indicator": indicator,
+        "year_filter": year,
+        "trial_filters": {
+            "phase": phase,
+            "sponsor": sponsor,
+            "status": status,
+        },
+        "burden_summary": {
+            "country_count": len(country_rankings),
+            "total_cases": _safe_round(sum(item["burden_cases"] or 0 for item in country_rankings)),
+            "total_population": _safe_round(sum(item["population"] or 0 for item in country_rankings)),
+        },
+        "trial_footprint_summary": {
+            "detail_sample_size": len(details),
+            "countries_with_visible_sites": len(trial_footprint_by_country),
+            "top_trial_countries": [
+                {
+                    "country": country,
+                    "visible_trial_count": len(entry["visible_trials"]),
+                    "visible_site_mentions": entry["site_mentions"],
+                }
+                for country, entry in sorted(
+                    trial_footprint_by_country.items(),
+                    key=lambda item: (-len(item[1]["visible_trials"]), -item[1]["site_mentions"], item[0]),
+                )[:10]
+            ],
+        },
+        "country_rankings": country_rankings[:max_results],
+    }
+
+    return detail_response(
+        tool_name="burden_vs_trial_footprint",
+        data_type="burden_vs_trial_footprint",
+        item=result,
+        quality_note="This tool ranks countries by combining oncology burden rows with the visible clinical-trial footprint from published site metadata. It is meant for opportunity triage, not for definitive epidemiology or feasibility decisions.",
+        coverage="Configured BigQuery oncology burden rows plus ClinicalTrials.gov detail records with visible site countries.",
+        queried_sources=queried_sources,
+        warnings=warnings,
+        evidence_sources=queried_sources,
+        evidence_trace=[
+            _trace_step(
+                "query_oncology_burden",
+                sources=burden_response.queried_sources,
+                note="Fetched oncology burden rows for the mapped disease site and indicator.",
+                filters={"indication": indication, "burden_site": burden_site, "indicator": indicator, "year": year, "max_results": 100},
+                output_kind="raw",
+                refs=burden_payload,
+            ),
+            *trial_trace,
+            _trace_step(
+                "compare_burden_to_trial_footprint",
+                sources=queried_sources,
+                note="Aggregated burden by country and compared it with the visible trial-country footprint to rank whitespace-like opportunities.",
+                filters={"indication": indication, "indicator": indicator, "year": year, "phase": phase, "sponsor": sponsor, "status": status, "max_results": max_results},
+                output_kind="derived",
+                refs=result["country_rankings"],
+            ),
+        ],
+        requested_filters={
+            "indication": indication,
+            "burden_site_used": burden_site,
+            "indicator": indicator,
+            "year": year,
+            "phase": phase,
+            "sponsor": sponsor,
+            "status": status,
+            "max_results": max_results,
+        },
+    )
+
+
+@mcp.tool()
+async def asset_dossier(
+    asset: str,
+    indication: str | None = None,
+    sponsor: str | None = None,
+    year_from: int = 2019,
+    include_preprints: bool = True,
+    include_conference_signals: bool = True,
+    include_approvals: bool = True,
+) -> dict[str, Any]:
+    """Cross-source asset dossier for one therapy or program name.
+
+Use this when you want one sponsor/asset-centric brief that bundles trials, literature, preprints, conference signals, and approved-drug context.
+
+Avoid this when you only need one source family, one known trial, or a broad indication-level watchlist.
+    """
+    normalized_asset = _clean_query_text(asset)
+    if not normalized_asset:
+        return detail_response(
+            tool_name="asset_dossier",
+            data_type="asset_dossier",
+            item=None,
+            quality_note="Asset dossiers require a concrete therapy, asset, or program name.",
+            coverage="ClinicalTrials.gov, PubMed, medRxiv, Europe PMC, and optional OpenFDA context.",
+            missing_message="Provide a non-empty `asset` value.",
+            warnings=[
+                {
+                    "source": "tool_validation",
+                    "stage": "validate_asset",
+                    "error": "Asset dossiers require a concrete asset or program name.",
+                }
+            ],
+            requested_filters={
+                "asset": asset,
+                "indication": indication,
+                "sponsor": sponsor,
+            },
+            evidence_sources=["tool_validation"],
+            evidence_trace=[
+                _trace_step(
+                    "validate_asset",
+                    sources=["tool_validation"],
+                    note="Rejected the request because no usable asset name was provided.",
+                    filters={"asset": asset},
+                    output_kind="raw",
+                    refs=[],
+                )
+            ],
+        )
+
+    trial_response = await registry.search_trials(
+        condition=indication or "",
+        query=normalized_asset,
+        sponsor=sponsor,
+        intervention=normalized_asset,
+        max_results=ANALYSIS_MAX_RESULTS,
+    )
+    fallback_trial_response = None
+    if not trial_response.items:
+        fallback_trial_response = await registry.search_trials(
+            condition=indication or "",
+            query=normalized_asset,
+            sponsor=sponsor,
+            intervention=None,
+            max_results=ANALYSIS_MAX_RESULTS,
+        )
+        if fallback_trial_response.items:
+            trial_response = fallback_trial_response
+
+    details, detail_warnings, detail_sources, detail_trace = await _fetch_details(
+        [trial.nct_id for trial in trial_response.items[: DETAIL_SAMPLE_SIZE * 2]]
+    )
+    publication_queries, preprint_queries, conference_queries = _asset_dossier_queries(
+        asset=normalized_asset,
+        indication=indication,
+        trials=trial_response.items,
+        details=details,
+    )
+
+    publications, publication_sources, publication_warnings = await _collect_publication_matches(
+        publication_queries,
+        year_from=year_from,
+        max_results_per_query=4,
+        search_fn=registry.search_publications,
+    )
+
+    preprints: list[Publication] = []
+    preprint_sources: list[str] = []
+    preprint_warnings: list[dict[str, str]] = []
+    if include_preprints:
+        preprints, preprint_sources, preprint_warnings = await _collect_publication_matches(
+            preprint_queries,
+            year_from=max(year_from, 2022),
+            max_results_per_query=3,
+            search_fn=registry.search_preprints,
+        )
+
+    conference_signals: list[ConferenceAbstract] = []
+    conference_sources: list[str] = []
+    conference_warnings: list[dict[str, str]] = []
+    if include_conference_signals:
+        conference_signals, conference_sources, conference_warnings = await _collect_conference_matches(
+            conference_queries,
+            year_from=year_from,
+            max_results_per_query=3,
+        )
+
+    approval_items: list[dict[str, Any]] = []
+    approval_sources: list[str] = []
+    approval_warnings: list[dict[str, str]] = []
+    if include_approvals and indication:
+        approval_response = await registry.search_approved_drugs(
+            indication=indication,
+            sponsor=sponsor,
+            intervention=normalized_asset,
+            max_results=6,
+        )
+        approval_items = [item.model_dump() for item in approval_response.items]
+        approval_sources = approval_response.queried_sources
+        approval_warnings = _warning_dicts(approval_response.warnings)
+
+    warnings = _warning_dicts(
+        trial_response.warnings,
+        _warning_dicts(fallback_trial_response.warnings) if fallback_trial_response is not None else [],
+        detail_warnings,
+        publication_warnings,
+        preprint_warnings,
+        conference_warnings,
+        approval_warnings,
+    )
+    queried_sources = sorted(
+        set(
+            trial_response.queried_sources
+            + detail_sources
+            + publication_sources
+            + preprint_sources
+            + conference_sources
+            + approval_sources
+        )
+    )
+
+    trial_payload = [item.model_dump() for item in trial_response.items]
+    detail_payload = [item.model_dump() for item in details]
+    publication_payload = annotate_evidence_quality([item.model_dump() for item in publications], sort_desc=True)
+    preprint_payload = annotate_evidence_quality([item.model_dump() for item in preprints], sort_desc=True)
+    conference_payload = annotate_evidence_quality([item.model_dump() for item in conference_signals], sort_desc=True)
+    approval_payload = annotate_evidence_quality(approval_items, sort_desc=True)
+    evidence_documents = annotate_evidence_quality(
+        detail_payload + publication_payload + preprint_payload + conference_payload + approval_payload,
+        sort_desc=True,
+    )
+
+    result = {
+        "dossier_type": "cross_source_asset_dossier",
+        "asset": normalized_asset,
+        "indication_filter": indication,
+        "sponsor_filter": sponsor,
+        "year_from": year_from,
+        "queries_used": {
+            "publication_queries": publication_queries,
+            "preprint_queries": preprint_queries if include_preprints else [],
+            "conference_queries": conference_queries if include_conference_signals else [],
+        },
+        "trial_program": {
+            "trial_count": len(trial_payload),
+            "active_trial_count": sum(1 for trial in trial_response.items if trial.overall_status in ACTIVE_STATUSES),
+            "completed_trial_count": sum(1 for trial in trial_response.items if trial.overall_status == "COMPLETED"),
+            "terminated_trial_count": sum(1 for trial in trial_response.items if trial.overall_status in TERMINAL_STATUSES),
+            "phase_distribution": dict(
+                sorted(
+                    Counter(phase_code(trial.phase) or "UNSPECIFIED" for trial in trial_response.items).items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ),
+            "top_sponsors": _top_sponsor_rows(trial_response.items),
+            "top_mechanisms": _top_mechanism_rows(trial_response.items),
+        },
+        "key_trials": detail_payload[:5],
+        "publications": publication_payload[:6],
+        "preprints": preprint_payload[:5] if include_preprints else [],
+        "conference_signals": conference_payload[:5] if include_conference_signals else [],
+        "approved_context": approval_payload[:5] if include_approvals else [],
+        "evidence_summary": {
+            "trial_count": len(trial_payload),
+            "trial_detail_count": len(detail_payload),
+            "publication_count": len(publication_payload),
+            "preprint_count": len(preprint_payload) if include_preprints else 0,
+            "conference_signal_count": len(conference_payload) if include_conference_signals else 0,
+            "approved_context_count": len(approval_payload) if include_approvals and indication else 0,
+        },
+        "evidence_quality_summary": summarize_evidence_quality(evidence_documents),
+    }
+
+    evidence_trace = [
+        _trace_step(
+            "search_trial_registry",
+            sources=trial_response.queried_sources,
+            note="Fetched trial rows matching the requested asset plus optional indication and sponsor filters.",
+            filters={"asset": normalized_asset, "indication": indication, "sponsor": sponsor, "max_results": ANALYSIS_MAX_RESULTS},
+            output_kind="raw",
+            refs=trial_payload,
+        ),
+        *detail_trace,
+        _trace_step(
+            "search_publications",
+            sources=publication_sources,
+            note="Fetched peer-reviewed literature using asset-centric and title-derived queries.",
+            filters={"queries": publication_queries, "year_from": year_from, "max_results_per_query": 4},
+            output_kind="raw",
+            refs=publication_payload,
+        ),
+    ]
+    if fallback_trial_response is not None and fallback_trial_response.items:
+        evidence_trace.insert(
+            1,
+            _trace_step(
+                "fallback_trial_search_without_intervention_filter",
+                sources=fallback_trial_response.queried_sources,
+                note="Retried the trial search without the structured intervention filter after the stricter asset match returned no visible studies.",
+                filters={"asset": normalized_asset, "indication": indication, "sponsor": sponsor, "max_results": ANALYSIS_MAX_RESULTS},
+                output_kind="raw",
+                refs=[item.model_dump() for item in fallback_trial_response.items],
+            ),
+        )
+    if include_preprints:
+        evidence_trace.append(
+            _trace_step(
+                "search_preprints",
+                sources=preprint_sources,
+                note="Fetched preprints using asset-centric and title-derived queries.",
+                filters={"queries": preprint_queries, "year_from": max(year_from, 2022), "max_results_per_query": 3},
+                output_kind="raw",
+                refs=preprint_payload,
+            )
+        )
+    if include_conference_signals:
+        evidence_trace.append(
+            _trace_step(
+                "search_conference_signals",
+                sources=conference_sources,
+                note="Fetched conference-stage evidence for the asset using Europe PMC conference matching.",
+                filters={"queries": conference_queries, "year_from": year_from, "max_results_per_query": 3},
+                output_kind="raw",
+                refs=conference_payload,
+            )
+        )
+    if include_approvals and indication:
+        evidence_trace.append(
+            _trace_step(
+                "search_approved_drug_labels",
+                sources=approval_sources,
+                note="Fetched approved-drug label context for the same indication and asset terms.",
+                filters={"indication": indication, "sponsor": sponsor, "intervention": normalized_asset, "max_results": 6},
+                output_kind="raw",
+                refs=approval_payload,
+            )
+        )
+    evidence_trace.append(
+        _trace_step(
+            "assemble_asset_dossier",
+            sources=queried_sources,
+            note="Packaged the trial, literature, conference, and approval context into one asset-centric dossier.",
+            filters={
+                "asset": normalized_asset,
+                "indication": indication,
+                "sponsor": sponsor,
+                "year_from": year_from,
+                "include_preprints": include_preprints,
+                "include_conference_signals": include_conference_signals,
+                "include_approvals": include_approvals,
+            },
+            output_kind="derived",
+            refs=[result],
+        )
+    )
+
+    return detail_response(
+        tool_name="asset_dossier",
+        data_type="asset_dossier",
+        item=result,
+        quality_note="The asset dossier is a cross-source brief meant to accelerate competitive and program scouting. It bundles evidence around an asset name, so it should be reviewed for false-positive query matches before making high-stakes decisions.",
+        coverage="ClinicalTrials.gov, PubMed, optional medRxiv, optional Europe PMC conference records, and optional OpenFDA context.",
+        queried_sources=queried_sources,
+        warnings=warnings,
+        evidence_sources=queried_sources,
+        evidence_trace=evidence_trace,
+        requested_filters={
+            "asset": normalized_asset,
+            "indication": indication,
+            "sponsor": sponsor,
+            "year_from": year_from,
+            "include_preprints": include_preprints,
+            "include_conference_signals": include_conference_signals,
+            "include_approvals": include_approvals,
+        },
+    )
+
+
+@mcp.tool()
+async def estimate_commercial_opportunity_proxy(
+    indication: str,
+    indicator: str = "Mortality",
+    year: int | None = None,
+    max_results: int = 10,
+) -> dict[str, Any]:
+    """Heuristic strategy proxy for disease burden, treatment gap, and visible competition.
+
+Use this when you want a rough commercial-opportunity proxy built from burden, approved-drug scarcity, visible trial competition, and visible trial-footprint gaps.
+
+Avoid this when you need real pricing, reimbursement, sales, or epidemiology/market-access data.
+    """
+    max_results = min(max_results, 25)
+    burden_vs_trial = await burden_vs_trial_footprint(
+        indication=indication,
+        indicator=indicator,
+        year=year,
+        max_results=max_results,
+    )
+    burden_meta = burden_vs_trial.get("_meta") or {}
+    burden_result = burden_vs_trial.get("result") or {}
+    country_rankings = list(burden_result.get("country_rankings") or [])
+
+    trial_response = await registry.search_trials(
+        condition=indication,
+        max_results=ANALYSIS_MAX_RESULTS,
+    )
+    approval_response = await registry.search_approved_drugs(
+        indication=indication,
+        max_results=20,
+    )
+
+    trial_payload = [item.model_dump() for item in trial_response.items]
+    approval_payload = annotate_evidence_quality([item.model_dump() for item in approval_response.items], sort_desc=True)
+    approved_drug_count = len(approval_response.items)
+    active_trial_count = sum(1 for trial in trial_response.items if trial.overall_status in ACTIVE_STATUSES)
+    unique_sponsors = len({trial.lead_sponsor for trial in trial_response.items if trial.lead_sponsor})
+    total_trial_count = len(trial_response.items)
+
+    burden_cases = [float(item["burden_cases"]) for item in country_rankings if isinstance(item.get("burden_cases"), (int, float))]
+    burden_rates = [float(item["burden_per_100k"]) for item in country_rankings if isinstance(item.get("burden_per_100k"), (int, float))]
+    total_cases = sum(burden_cases)
+    average_burden_per_100k = round(sum(burden_rates) / len(burden_rates), 2) if burden_rates else None
+
+    burden_score = _burden_scale_score(
+        total_cases=total_cases,
+        average_burden_per_100k=average_burden_per_100k,
+        affected_country_count=len(country_rankings),
+    )
+    medication_gap_score = _medication_gap_score(approved_drug_count)
+    competition_whitespace_score = _competition_whitespace_score(
+        active_trial_count=active_trial_count,
+        unique_sponsors=unique_sponsors,
+        total_trial_count=total_trial_count,
+    )
+    footprint_gap_score = _clamp_score(
+        sum(float(item.get("footprint_gap_score", 0)) for item in country_rankings[:3]) / max(len(country_rankings[:3]), 1)
+        if country_rankings
+        else 0.05
+    )
+    commercial_proxy_score = _clamp_score(
+        0.40 * burden_score
+        + 0.25 * medication_gap_score
+        + 0.20 * competition_whitespace_score
+        + 0.15 * footprint_gap_score
+    )
+
+    max_country_cases = max(burden_cases, default=0.0)
+    country_opportunity_rankings: list[dict[str, Any]] = []
+    for row in country_rankings:
+        country_burden_share = (
+            float(row.get("burden_cases", 0)) / max_country_cases
+            if max_country_cases > 0 and isinstance(row.get("burden_cases"), (int, float))
+            else 0.0
+        )
+        country_proxy_score = _clamp_score(
+            0.55 * float(row.get("footprint_gap_score", 0))
+            + 0.25 * medication_gap_score
+            + 0.20 * country_burden_share
+        )
+        country_opportunity_rankings.append(
+            {
+                "country": row.get("country"),
+                "country_opportunity_proxy_score": country_proxy_score,
+                "country_opportunity_tier": _opportunity_tier(country_proxy_score),
+                "burden_cases": row.get("burden_cases"),
+                "burden_per_100k": row.get("burden_per_100k"),
+                "visible_trial_count": row.get("visible_trial_count"),
+                "visible_site_mentions": row.get("visible_site_mentions"),
+                "global_medication_gap_score": medication_gap_score,
+                "reference_burden_rows": row.get("reference_burden_rows", []),
+                "reference_trials": row.get("reference_trials", []),
+            }
+        )
+
+    country_opportunity_rankings.sort(
+        key=lambda item: (-float(item["country_opportunity_proxy_score"]), item.get("country") or "")
+    )
+
+    result = {
+        "proxy_type": "commercial_opportunity_proxy",
+        "indication": indication,
+        "indicator": indicator,
+        "year_filter": year,
+        "overall_proxy_score": commercial_proxy_score,
+        "overall_opportunity_tier": _opportunity_tier(commercial_proxy_score),
+        "proxy_components": {
+            "burden_scale_score": burden_score,
+            "medication_gap_score": medication_gap_score,
+            "competition_whitespace_score": competition_whitespace_score,
+            "footprint_gap_score": footprint_gap_score,
+        },
+        "proxy_inputs_summary": {
+            "total_cases": _safe_round(total_cases),
+            "average_burden_per_100k": average_burden_per_100k,
+            "affected_country_count": len(country_rankings),
+            "approved_drug_count": approved_drug_count,
+            "active_trial_count": active_trial_count,
+            "total_trial_count": total_trial_count,
+            "unique_visible_trial_sponsors": unique_sponsors,
+        },
+        "economic_proxy_limits": {
+            "includes_pricing_data": False,
+            "includes_reimbursement_data": False,
+            "includes_sales_data": False,
+            "includes_country_specific_access_data": False,
+            "note": "This is a strategic proxy only. It does not estimate revenue or market size directly because the current MCP lacks pricing, reimbursement, sales, and access sources.",
+        },
+        "approved_treatment_context": approval_payload[:8],
+        "competition_context": {
+            "top_sponsors": _top_sponsor_rows(trial_response.items),
+            "top_mechanisms": _top_mechanism_rows(trial_response.items),
+            "phase_distribution": dict(
+                sorted(
+                    Counter(phase_code(trial.phase) or "UNSPECIFIED" for trial in trial_response.items).items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ),
+        },
+        "country_opportunity_rankings": country_opportunity_rankings[:max_results],
+    }
+
+    warnings = _warning_dicts(
+        burden_meta.get("partial_failures", []),
+        trial_response.warnings,
+        approval_response.warnings,
+    )
+    queried_sources = sorted(
+        set(
+            list(burden_meta.get("evidence_sources") or [])
+            + trial_response.queried_sources
+            + approval_response.queried_sources
+        )
+    )
+
+    return detail_response(
+        tool_name="estimate_commercial_opportunity_proxy",
+        data_type="commercial_opportunity_proxy",
+        item=result,
+        quality_note="This tool is a commercial-strategy proxy built from burden, treatment scarcity, visible trial competition, and visible footprint gaps. It is intentionally heuristic and should not be read as a real revenue forecast.",
+        coverage="Configured BigQuery oncology burden rows, ClinicalTrials.gov trial records, and OpenFDA approved-drug label context.",
+        queried_sources=queried_sources,
+        warnings=warnings,
+        evidence_sources=queried_sources,
+        evidence_trace=[
+            _trace_step(
+                "load_burden_vs_trial_footprint",
+                sources=list(burden_meta.get("evidence_sources") or []),
+                note="Loaded the burden-versus-trial-footprint comparison as the geographic opportunity base layer.",
+                filters={"indication": indication, "indicator": indicator, "year": year, "max_results": max_results},
+                output_kind="derived",
+                refs=country_rankings,
+            ),
+            _trace_step(
+                "search_trial_registry",
+                sources=trial_response.queried_sources,
+                note="Fetched the current trial landscape to estimate visible competition intensity.",
+                filters={"indication": indication, "max_results": ANALYSIS_MAX_RESULTS},
+                output_kind="raw",
+                refs=trial_payload,
+            ),
+            _trace_step(
+                "search_approved_drug_labels",
+                sources=approval_response.queried_sources,
+                note="Fetched approved-drug label records as a proxy for available treatment options.",
+                filters={"indication": indication, "max_results": 20},
+                output_kind="raw",
+                refs=approval_payload,
+            ),
+            _trace_step(
+                "score_commercial_opportunity_proxy",
+                sources=queried_sources,
+                note="Combined burden scale, medication scarcity, visible competition intensity, and footprint gaps into a strategy proxy score. No pricing, reimbursement, or sales data were used.",
+                filters={"indication": indication, "indicator": indicator, "year": year, "max_results": max_results},
+                output_kind="heuristic",
+                refs=[result],
+            ),
+        ],
+        requested_filters={
+            "indication": indication,
+            "indicator": indicator,
+            "year": year,
+            "max_results": max_results,
+        },
     )
 
 

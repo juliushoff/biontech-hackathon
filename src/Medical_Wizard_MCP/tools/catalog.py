@@ -15,9 +15,9 @@ async def describe_tools(
 ) -> dict[str, Any]:
     """Meta tool for LLM routing.
 
-Use this first when you are unsure which MCP tool to call. It returns a structured catalog with each tool's category, output kind, canonical parameters, aliases, routing hints, and recommended next tools.
+Use this first when you are unsure which MCP tool to call or when multiple tools overlap. It returns a structured catalog with each tool's category, output kind, canonical parameters, aliases, routing hints, decision boundaries, and recommended next tools.
 
-Avoid calling this when you already know the exact tool you need.
+Avoid calling this when you already know the exact tool you need or when the user is asking for evidence rather than tool-selection help.
     """
     items = list_tool_metadata(
         tool_names=tool_names,
@@ -28,7 +28,7 @@ Avoid calling this when you already know the exact tool you need.
         tool_name="describe_tools",
         data_type="tool_catalog",
         items=items,
-        quality_note="The catalog is generated from server-maintained metadata and is intended to help attached LLMs choose tools more reliably.",
+        quality_note="The catalog is generated from server-maintained metadata and is intended to help attached LLMs choose the right tool family, output type, and routing path more reliably.",
         coverage="All MCP tools currently registered by this server.",
         queried_sources=["server_catalog"],
         evidence_sources=["server_catalog"],

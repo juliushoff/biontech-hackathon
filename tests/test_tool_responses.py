@@ -551,3 +551,30 @@ async def test_describe_tools_returns_structured_catalog() -> None:
     assert response["_meta"]["source"] == "server_catalog"
     assert response["count"] >= 1
     assert any(item["tool_name"] == "search_trials" for item in response["results"])
+
+
+@pytest.mark.asyncio
+async def test_describe_tools_surfaces_new_cross_source_tools() -> None:
+    response = await describe_tools(
+        tool_names=[
+            "asset_dossier",
+            "burden_vs_trial_footprint",
+            "estimate_commercial_opportunity_proxy",
+        ],
+    )
+
+    tool_names = {item["tool_name"] for item in response["results"]}
+    assert tool_names == {
+        "asset_dossier",
+        "burden_vs_trial_footprint",
+        "estimate_commercial_opportunity_proxy",
+    }
+    asset_tool = next(item for item in response["results"] if item["tool_name"] == "asset_dossier")
+    burden_tool = next(item for item in response["results"] if item["tool_name"] == "burden_vs_trial_footprint")
+    proxy_tool = next(
+        item for item in response["results"] if item["tool_name"] == "estimate_commercial_opportunity_proxy"
+    )
+    assert asset_tool["family"] == "portfolio"
+    assert burden_tool["family"] == "cross_source"
+    assert proxy_tool["family"] == "commercial_proxy"
+    assert proxy_tool["output_kind"] == "heuristic"

@@ -34,10 +34,13 @@ The project is intentionally LLM-first:
 - medRxiv preprint search
 - conference-style evidence search
 - approved-drug / label context
+- oncology burden lookup from BigQuery-backed epidemiology rows
 - trial benchmarking and competitive landscaping
+- cross-source asset briefs and burden-versus-footprint scans
+- heuristic commercial-prioritization proxies when no pricing data is available
 - audit-style passage extraction and claim checking
 
-As of the current codebase, the server exposes `30` MCP tools:
+As of the current codebase, the server exposes `34` MCP tools:
 
 - `describe_tools`
 - `search_trials`
@@ -63,6 +66,9 @@ As of the current codebase, the server exposes `30` MCP tools:
 - `analyze_patient_segments`
 - `forecast_readouts`
 - `track_competitor_assets`
+- `burden_vs_trial_footprint`
+- `asset_dossier`
+- `estimate_commercial_opportunity_proxy`
 - `summarize_safety_signals`
 - `investigator_site_landscape`
 - `watch_indication_signals`
@@ -83,6 +89,7 @@ Three output classes are used throughout the tool catalog:
 ```text
 src/Medical_Wizard_MCP/
 ├── __main__.py
+├── app.py
 ├── server.py
 ├── models/
 │   ├── __init__.py
@@ -91,6 +98,7 @@ src/Medical_Wizard_MCP/
 │   ├── __init__.py
 │   ├── _conference_utils.py
 │   ├── base.py
+│   ├── bigquery_oncology.py
 │   ├── registry.py
 │   ├── clinicaltrials.py
 │   ├── europepmc.py
@@ -111,6 +119,7 @@ src/Medical_Wizard_MCP/
     ├── drugs.py
     ├── intelligence.py
     ├── monitoring.py
+    ├── oncology_burden.py
     ├── publications.py
     ├── search.py
     └── timelines.py
@@ -154,7 +163,8 @@ User question
 | `sources/` | HTTP calls, payload parsing, source quirks, normalization | user-facing reasoning, narrative synthesis |
 | `sources/registry.py` | fan-out, dedupe, source selection, warning collection | source-specific parsing |
 | `tools/` | thin MCP wrappers, bounded aggregation, response envelopes | raw HTTP calls |
-| `server.py` | shared `FastMCP` instance and auth setup | tool logic |
+| `app.py` | shared `FastMCP` instance | tool logic |
+| `server.py` | request-context middleware and server-side helpers | tool registration |
 
 ### Design Rules
 
@@ -258,7 +268,7 @@ mcpServers:
 Commonly useful variables:
 
 ```bash
-JWT_SECRET=dev-secret
+JWT_SECRET=dev-secret         # optional today; some tests still mint bearer tokens from it
 PUBMED_API_KEY=       # increases PubMed rate limit from 3 to 10 req/s
 PUBMED_EMAIL=         # recommended by NCBI for identification
 CLINICALTRIALS_PREFER_CURL=1  # default transport for ClinicalTrials.gov; set to 0 to retry httpx first
@@ -275,7 +285,7 @@ gcloud auth application-default login
 ```
 
 Notes:
-- `JWT_SECRET` is effectively required because the server config uses `JWTVerifier` with `HS256`.
+- `JWT_SECRET` is not currently required to run the local server. It is only useful if you want parity with bearer-token based tests or future auth-enabled deployments.
 - `PUBMED_API_KEY` increases PubMed throughput.
 - `PUBMED_EMAIL` is recommended by NCBI.
 - `CLINICALTRIALS_PREFER_CURL=1` keeps the ClinicalTrials.gov adapter on its curl-first path.
@@ -284,21 +294,18 @@ Notes:
 
 ## Authentication
 
-The server is configured with JWT auth in [src/Medical_Wizard_MCP/server.py](/Users/jannikmuller/PhpstormProjects/biontech-hackathon/src/Medical_Wizard_MCP/server.py).
+The current runtime creates the shared `FastMCP` instance in [app.py](/Users/jannikmuller/PhpstormProjects/biontech-hackathon/src/Medical_Wizard_MCP/app.py) without an attached auth provider, so local streamable-HTTP development does not require JWT configuration today.
 
 Current behavior:
-- algorithm: `HS256`
-- secret source: `JWT_SECRET`
-- expected scope in tests: `mcp:access`
+- runtime auth enforcement: disabled
+- bearer-token test helper: still present in [tests/conftest.py](/Users/jannikmuller/PhpstormProjects/biontech-hackathon/tests/conftest.py)
+- optional secret env var for those tests: `JWT_SECRET`
 
-For local development, exporting any non-empty `JWT_SECRET` is enough:
+If you want parity with those tests, export a local secret before running them:
 
 ```bash
 export JWT_SECRET=dev-secret
-./local-dev/run-server.sh
 ```
-
-Tests generate bearer tokens from the same secret in [tests/conftest.py](/Users/jannikmuller/PhpstormProjects/biontech-hackathon/tests/conftest.py).
 
 ---
 
@@ -338,6 +345,7 @@ This makes the server easier for attached LLMs to route, cite, and audit.
 | `search_preprints` | `raw` | medRxiv preprint retrieval |
 | `search_conference_abstracts` | `raw` | conference-style evidence retrieval via Europe PMC |
 | `search_approved_drugs` | `raw` | approved-drug / label context from OpenFDA |
+| `search_oncology_burden` | `raw` | structured oncology burden rows from the configured BigQuery view |
 
 #### Analysis and benchmarking
 
@@ -356,6 +364,9 @@ This makes the server easier for attached LLMs to route, cite, and audit.
 | `analyze_patient_segments` | `derived` | biomarker / line-of-therapy / segment patterns |
 | `forecast_readouts` | `heuristic` | readout estimates from known or inferred dates |
 | `track_competitor_assets` | `derived` | sponsor/asset grouping over trial records |
+| `burden_vs_trial_footprint` | `derived` | ranks countries by high burden and low visible trial footprint |
+| `asset_dossier` | `derived` | cross-source asset brief spanning trials, literature, preprints, conferences, and optional labels |
+| `estimate_commercial_opportunity_proxy` | `heuristic` | strategic proxy built from burden, treatment scarcity, visible competition, and footprint gaps |
 | `summarize_safety_signals` | `derived` | safety signal aggregation from available evidence |
 | `investigator_site_landscape` | `derived` | site / country / official landscape |
 | `watch_indication_signals` | `derived` | combined signal summary across trials and literature |
@@ -419,6 +430,20 @@ Conference retrieval currently:
 
 This is meant for early-signal scouting, not as a substitute for full journal evidence.
 
+#### `search_oncology_burden`
+
+The tool name exposed to MCP clients is `search_oncology_burden`.
+
+Important distinction:
+- tool discovery depends on the server process and imported tool modules
+- successful burden queries additionally depend on the BigQuery source initializing correctly
+
+If the tool is missing in MCP Inspector, that usually means the Inspector is attached to an older server process or the wrong endpoint, not that BigQuery credentials are missing.
+
+#### `estimate_commercial_opportunity_proxy`
+
+This tool is intentionally heuristic. It does not estimate revenue directly and does not include pricing, reimbursement, sales, or country-specific access data.
+
 #### `track_indication_changes`
 
 This tool is intentionally snapshot-based. It filters the currently retrievable records by date and does not reconstruct historical state transitions from persisted snapshots.
@@ -436,6 +461,7 @@ Currently registered sources in [src/Medical_Wizard_MCP/__main__.py](/Users/jann
 | `medRxiv` | preprints | `preprint_search` |
 | `OpenFDA` | approved-drug / label context | `approved_drugs` |
 | `Europe PMC` | conference-oriented scholarly retrieval | `conference_search` |
+| `BigQuery oncology burden` | epidemiology-style burden rows | `oncology_burden_search` |
 
 ### SourceRegistry behavior
 
@@ -466,6 +492,7 @@ Current public data models:
 | `Publication` | PubMed and medRxiv records |
 | `ConferenceAbstract` | conference-style evidence rows |
 | `ApprovedDrug` | OpenFDA label-derived drug records |
+| `OncologyBurdenRecord` | BigQuery burden rows |
 
 Model normalization goals:
 - consistent field names across sources
@@ -481,7 +508,7 @@ Model normalization goals:
 Core regression suite:
 
 ```bash
-uv run pytest tests/test_tool_responses.py tests/test_intelligence_tools.py
+uv run pytest tests/test_tool_responses.py tests/test_intelligence_tools.py tests/test_all_tools_smoke.py
 ```
 
 Broader smoke coverage:
@@ -543,9 +570,22 @@ CONFERENCE_LIVE_YEAR_FROM=2022
 CONFERENCE_LIVE_SERIES="ASCO,AACR,ESMO,SITC"
 ```
 
+### Inspector sanity check
+
+If MCP Inspector does not show a recently added tool, verify the local registry directly:
+
+```bash
+uv run python -c "import asyncio, Medical_Wizard_MCP.__main__ as app; print(sorted(t.name for t in asyncio.run(app.mcp.list_tools())))"
+```
+
+For the oncology burden tool specifically:
+- the MCP tool name is `search_oncology_burden`
+- missing BigQuery credentials prevent successful queries, but should not hide the tool from discovery
+- if it is absent in Inspector, restart `./local-dev/run-server.sh` and reconnect the Inspector to `http://127.0.0.1:8000/mcp`
+
 ### Auth-related test note
 
-Because the server uses JWT auth, set `JWT_SECRET` in your environment before running tests that import the full server stack:
+Some tests still mint bearer tokens from `JWT_SECRET`, even though runtime auth is currently disabled by default:
 
 ```bash
 export JWT_SECRET=dev-secret
@@ -593,6 +633,7 @@ uv run pytest
 - `track_indication_changes` is based on current retrievable records and date filtering, not persisted historical snapshots.
 - Audit tools only operate on directly available text such as registry fields, abstracts, and labels.
 - Conference retrieval is useful but inherently noisier than PubMed literature search.
+- `estimate_commercial_opportunity_proxy` is a prioritization proxy, not a revenue model.
 - Source coverage remains public-source-only; no internal BioNTech systems or proprietary conference feeds are integrated.
 - Some heuristics in `intelligence.py` and `_intelligence.py` are oncology-focused and should be treated as lightweight assists, not decision engines.
 

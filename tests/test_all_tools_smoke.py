@@ -5,6 +5,7 @@ import pytest
 from Medical_Wizard_MCP.models import (
     ApprovedDrug,
     ConferenceAbstract,
+    OncologyBurdenRecord,
     Publication,
     TrialDetail,
     TrialSummary,
@@ -17,6 +18,9 @@ from Medical_Wizard_MCP.tools.drugs import search_approved_drugs
 from Medical_Wizard_MCP.tools.intelligence import (
     compare_trials,
     competitive_landscape,
+    asset_dossier,
+    burden_vs_trial_footprint,
+    estimate_commercial_opportunity_proxy,
     find_whitespaces,
     get_recruitment_velocity,
     get_trial_density,
@@ -197,6 +201,23 @@ CONFERENCE_ABSTRACT = ConferenceAbstract(
     journal="Journal of Clinical Oncology",
 )
 
+BURDEN_RECORD = OncologyBurdenRecord(
+    source="bigquery_oncology",
+    dataset="oncology_burden_search",
+    study="Burden dataset",
+    registry="National Cancer Registry",
+    country="Germany",
+    sex="All",
+    site="Lung",
+    indicator="Mortality",
+    geo_code="DE",
+    year=2024,
+    age_min=0,
+    age_max=120,
+    cases=10000.0,
+    population=83000000.0,
+)
+
 
 def _normalize_phase(value: str | None) -> str | None:
     if value is None:
@@ -314,6 +335,9 @@ def _patch_registry(monkeypatch: pytest.MonkeyPatch) -> None:
             ]
         return ListQueryResult(items=items, queried_sources=["openfda"], warnings=[])
 
+    async def fake_search_oncology_burden(**_: object) -> ListQueryResult[OncologyBurdenRecord]:
+        return ListQueryResult(items=[BURDEN_RECORD], queried_sources=["bigquery_oncology"], warnings=[])
+
     monkeypatch.setattr(registry, "search_trials", fake_search_trials)
     monkeypatch.setattr(registry, "get_trial_details", fake_get_trial_details)
     monkeypatch.setattr(registry, "get_trial_timelines", fake_get_trial_timelines)
@@ -321,6 +345,7 @@ def _patch_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry, "search_preprints", fake_search_preprints)
     monkeypatch.setattr(registry, "search_conference_abstracts", fake_search_conference_abstracts)
     monkeypatch.setattr(registry, "search_approved_drugs", fake_search_approved_drugs)
+    monkeypatch.setattr(registry, "search_oncology_burden", fake_search_oncology_burden)
 
 
 TOOL_CASES = [
@@ -350,6 +375,21 @@ TOOL_CASES = [
         "search_approved_drugs",
         lambda: search_approved_drugs(indication="NSCLC", sponsor="Merck"),
         "results",
+    ),
+    (
+        "asset_dossier",
+        lambda: asset_dossier(asset="mRNA vaccine", indication="NSCLC"),
+        "result",
+    ),
+    (
+        "burden_vs_trial_footprint",
+        lambda: burden_vs_trial_footprint(indication="NSCLC"),
+        "result",
+    ),
+    (
+        "estimate_commercial_opportunity_proxy",
+        lambda: estimate_commercial_opportunity_proxy(indication="NSCLC"),
+        "result",
     ),
     ("compare_trials", lambda: compare_trials(["NCT10000001", "NCT10000002"]), "results"),
     (

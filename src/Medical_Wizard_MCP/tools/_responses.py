@@ -315,6 +315,8 @@ def _list_meta(
             "requires_identifiers": tool_metadata.get("requires_identifiers", []),
             "use_when": tool_metadata.get("use_when", []),
             "avoid_when": tool_metadata.get("avoid_when", []),
+            "decision_boundary": tool_metadata.get("decision_boundary", ""),
+            "choose_instead_of": tool_metadata.get("choose_instead_of", []),
             "typical_next_tools": tool_metadata.get("typical_next_tools", []),
         }
         if tool_metadata.get("deprecated"):

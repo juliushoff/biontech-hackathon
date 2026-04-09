@@ -2,16 +2,27 @@ from __future__ import annotations
 
 import pytest
 
-from Medical_Wizard_MCP.models import ApprovedDrug, Publication, TrialDetail, TrialSummary, TrialTimeline
+from Medical_Wizard_MCP.models import (
+    ApprovedDrug,
+    ConferenceAbstract,
+    OncologyBurdenRecord,
+    Publication,
+    TrialDetail,
+    TrialSummary,
+    TrialTimeline,
+)
 from Medical_Wizard_MCP.sources.registry import DetailQueryResult, ListQueryResult
 from Medical_Wizard_MCP.tools.intelligence import (
     analyze_competition_gaps,
     analyze_patient_segments,
+    asset_dossier,
     benchmark_eligibility_criteria,
     benchmark_endpoints,
     benchmark_trial_design,
+    burden_vs_trial_footprint,
     compare_trials,
     competitive_landscape,
+    estimate_commercial_opportunity_proxy,
     forecast_readouts,
     find_whitespaces,
     get_recruitment_velocity,
@@ -198,6 +209,74 @@ PREPRINT_1 = Publication(
     mesh_terms=["Cancer Biology"],
 )
 
+CONFERENCE_1 = ConferenceAbstract(
+    source="europe_pmc",
+    source_id="CONF-1",
+    title="ASCO update for mRNA vaccine plus pembrolizumab in NSCLC",
+    authors=["Example Author"],
+    conference_name="ASCO Annual Meeting",
+    conference_series="ASCO",
+    presentation_type="oral presentation",
+    abstract_number="LBA1001",
+    publication_year=2025,
+    publication_date="2025-06-01",
+    abstract="Updated translational and clinical efficacy signal.",
+    doi="10.1200/JCO.2025.LBA1001",
+    url="https://doi.org/10.1200/JCO.2025.LBA1001",
+    journal="Journal of Clinical Oncology",
+)
+
+BURDEN_DE = OncologyBurdenRecord(
+    source="bigquery_oncology",
+    dataset="oncology_burden_search",
+    study="Burden dataset",
+    registry="German Registry",
+    country="Germany",
+    sex="All",
+    site="Lung",
+    indicator="Mortality",
+    geo_code="DE",
+    year=2024,
+    age_min=0,
+    age_max=120,
+    cases=10000.0,
+    population=83000000.0,
+)
+
+BURDEN_FR = OncologyBurdenRecord(
+    source="bigquery_oncology",
+    dataset="oncology_burden_search",
+    study="Burden dataset",
+    registry="French Registry",
+    country="France",
+    sex="All",
+    site="Lung",
+    indicator="Mortality",
+    geo_code="FR",
+    year=2024,
+    age_min=0,
+    age_max=120,
+    cases=9000.0,
+    population=68000000.0,
+)
+
+BURDEN_ES = OncologyBurdenRecord(
+    source="bigquery_oncology",
+    dataset="oncology_burden_search",
+    study="Burden dataset",
+    registry="Spanish Registry",
+    country="Spain",
+    sex="All",
+    site="Lung",
+    indicator="Mortality",
+    geo_code="ES",
+    year=2024,
+    age_min=0,
+    age_max=120,
+    cases=7000.0,
+    population=48000000.0,
+)
+
 APPROVED_DRUG_1 = ApprovedDrug(
     source="openfda",
     approval_id="BLA123456",
@@ -378,14 +457,26 @@ async def test_extended_intelligence_tools_return_expected_shapes(monkeypatch: p
     async def fake_search_preprints(**_: object) -> ListQueryResult[Publication]:
         return ListQueryResult(queried_sources=["medrxiv"], warnings=[], items=[PREPRINT_1])
 
+    async def fake_search_conference_abstracts(**_: object) -> ListQueryResult[ConferenceAbstract]:
+        return ListQueryResult(queried_sources=["europe_pmc"], warnings=[], items=[CONFERENCE_1])
+
     async def fake_search_approved_drugs(**_: object) -> ListQueryResult[ApprovedDrug]:
         return ListQueryResult(queried_sources=["openfda"], warnings=[], items=[APPROVED_DRUG_1])
+
+    async def fake_search_oncology_burden(**_: object) -> ListQueryResult[OncologyBurdenRecord]:
+        return ListQueryResult(
+            queried_sources=["bigquery_oncology"],
+            warnings=[],
+            items=[BURDEN_DE, BURDEN_FR, BURDEN_ES],
+        )
 
     monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_trials", fake_search_trials)
     monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.get_trial_details", fake_get_trial_details)
     monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_publications", fake_search_publications)
     monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_preprints", fake_search_preprints)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_conference_abstracts", fake_search_conference_abstracts)
     monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_approved_drugs", fake_search_approved_drugs)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_oncology_burden", fake_search_oncology_burden)
 
     design_benchmark = await benchmark_trial_design(indication="NSCLC", mechanism="mRNA vaccine")
     eligibility = await benchmark_eligibility_criteria(indication="NSCLC")
@@ -394,6 +485,9 @@ async def test_extended_intelligence_tools_return_expected_shapes(monkeypatch: p
     segments = await analyze_patient_segments(indication="NSCLC")
     readouts = await forecast_readouts(indication="NSCLC", months_ahead=60)
     assets = await track_competitor_assets(indication="NSCLC")
+    asset_brief = await asset_dossier(indication="NSCLC", asset="mRNA vaccine")
+    burden_gap = await burden_vs_trial_footprint(indication="NSCLC")
+    commercial_proxy = await estimate_commercial_opportunity_proxy(indication="NSCLC")
     safety = await summarize_safety_signals(indication="NSCLC", mechanism="mRNA vaccine")
     sites = await investigator_site_landscape(indication="NSCLC")
     signals = await watch_indication_signals(indication="NSCLC", mechanism="mRNA vaccine")
@@ -414,6 +508,16 @@ async def test_extended_intelligence_tools_return_expected_shapes(monkeypatch: p
     assert readouts["_meta"]["evidence_trace"][-1]["step"] == "forecast_readout_dates"
     assert readouts["result"]["forecast"]
     assert assets["result"]["assets"]
+    assert asset_brief["result"]["dossier_type"] == "cross_source_asset_dossier"
+    assert asset_brief["result"]["conference_signals"]
+    assert asset_brief["_meta"]["evidence_trace"][-1]["step"] == "assemble_asset_dossier"
+    assert burden_gap["result"]["analysis_type"] == "cross_source_burden_vs_trial_footprint"
+    assert burden_gap["result"]["country_rankings"]
+    assert burden_gap["_meta"]["evidence_trace"][-1]["step"] == "compare_burden_to_trial_footprint"
+    assert commercial_proxy["result"]["proxy_type"] == "commercial_opportunity_proxy"
+    assert commercial_proxy["result"]["economic_proxy_limits"]["includes_pricing_data"] is False
+    assert commercial_proxy["_meta"]["output_kind"] == "heuristic"
+    assert commercial_proxy["_meta"]["evidence_trace"][-1]["step"] == "score_commercial_opportunity_proxy"
     assert safety["result"]["signals"]
     assert sites["result"]["countries"]
     assert signals["result"]["trial_activity"]["upcoming_readouts"]
@@ -485,3 +589,127 @@ async def test_link_trial_evidence_uses_trial_titles_for_publication_and_preprin
     assert response["result"]["evidence_summary"]["preprint_count"] == 1
     assert response["result"]["queries_used"]["publication_queries"][0] == "ROSETTA-Lung"
     assert response["result"]["queries_used"]["preprint_queries"][0] == "ROSETTA-Lung"
+
+
+@pytest.mark.asyncio
+async def test_asset_dossier_surfaces_cross_source_queries_and_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_publication_queries: list[str] = []
+    captured_conference_queries: list[str] = []
+
+    async def fake_search_trials(**_: object) -> ListQueryResult[TrialSummary]:
+        return ListQueryResult(queried_sources=["clinicaltrials_gov"], warnings=[], items=[TRIAL_A, TRIAL_B])
+
+    async def fake_get_trial_details(nct_id: str) -> DetailQueryResult[TrialDetail]:
+        detail_map = {
+            DETAIL_A.nct_id: DETAIL_A,
+            DETAIL_B.nct_id: DETAIL_B,
+        }
+        return DetailQueryResult(item=detail_map.get(nct_id), queried_sources=["clinicaltrials_gov"], warnings=[])
+
+    async def fake_search_publications(**kwargs: object) -> ListQueryResult[Publication]:
+        captured_publication_queries.append(str(kwargs.get("query")))
+        return ListQueryResult(queried_sources=["pubmed"], warnings=[], items=[PUB_1])
+
+    async def fake_search_preprints(**_: object) -> ListQueryResult[Publication]:
+        return ListQueryResult(queried_sources=["medrxiv"], warnings=[], items=[PREPRINT_1])
+
+    async def fake_search_conference_abstracts(**kwargs: object) -> ListQueryResult[ConferenceAbstract]:
+        captured_conference_queries.append(str(kwargs.get("query")))
+        return ListQueryResult(queried_sources=["europe_pmc"], warnings=[], items=[CONFERENCE_1])
+
+    async def fake_search_approved_drugs(**_: object) -> ListQueryResult[ApprovedDrug]:
+        return ListQueryResult(queried_sources=["openfda"], warnings=[], items=[APPROVED_DRUG_1])
+
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_trials", fake_search_trials)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.get_trial_details", fake_get_trial_details)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_publications", fake_search_publications)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_preprints", fake_search_preprints)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_conference_abstracts", fake_search_conference_abstracts)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_approved_drugs", fake_search_approved_drugs)
+
+    response = await asset_dossier(asset="mRNA vaccine", indication="NSCLC", sponsor="BioNTech")
+
+    assert "mRNA vaccine NSCLC" in response["result"]["queries_used"]["publication_queries"]
+    assert "mRNA vaccine NSCLC" in captured_publication_queries
+    assert response["result"]["evidence_summary"]["conference_signal_count"] == 1
+    assert response["result"]["evidence_summary"]["approved_context_count"] == 1
+    assert "mRNA vaccine NSCLC" in captured_conference_queries
+    assert response["_meta"]["evidence_trace"][-1]["step"] == "assemble_asset_dossier"
+
+
+@pytest.mark.asyncio
+async def test_burden_vs_trial_footprint_maps_subtype_to_parent_site(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_burden_filters: dict[str, object] = {}
+
+    async def fake_search_oncology_burden(**kwargs: object) -> ListQueryResult[OncologyBurdenRecord]:
+        captured_burden_filters.update(kwargs)
+        return ListQueryResult(
+            queried_sources=["bigquery_oncology"],
+            warnings=[],
+            items=[BURDEN_DE, BURDEN_FR, BURDEN_ES],
+        )
+
+    async def fake_search_trials(**_: object) -> ListQueryResult[TrialSummary]:
+        return ListQueryResult(queried_sources=["clinicaltrials_gov"], warnings=[], items=[TRIAL_A, TRIAL_B])
+
+    async def fake_get_trial_details(nct_id: str) -> DetailQueryResult[TrialDetail]:
+        detail_map = {
+            DETAIL_A.nct_id: DETAIL_A,
+            DETAIL_B.nct_id: DETAIL_B,
+        }
+        return DetailQueryResult(item=detail_map.get(nct_id), queried_sources=["clinicaltrials_gov"], warnings=[])
+
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_oncology_burden", fake_search_oncology_burden)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_trials", fake_search_trials)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.get_trial_details", fake_get_trial_details)
+
+    response = await burden_vs_trial_footprint(indication="NSCLC", sponsor="BioNTech")
+
+    assert captured_burden_filters["site"] == "Lung"
+    assert response["result"]["burden_site_used"] == "Lung"
+    assert response["result"]["country_rankings"][0]["country"] in {"France", "Spain"}
+    assert response["result"]["country_rankings"][0]["footprint_gap_score"] >= response["result"]["country_rankings"][-1]["footprint_gap_score"]
+
+
+@pytest.mark.asyncio
+async def test_estimate_commercial_opportunity_proxy_surfaces_limits_and_scores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_search_oncology_burden(**_: object) -> ListQueryResult[OncologyBurdenRecord]:
+        return ListQueryResult(
+            queried_sources=["bigquery_oncology"],
+            warnings=[],
+            items=[BURDEN_DE, BURDEN_FR, BURDEN_ES],
+        )
+
+    async def fake_search_trials(**_: object) -> ListQueryResult[TrialSummary]:
+        return ListQueryResult(queried_sources=["clinicaltrials_gov"], warnings=[], items=[TRIAL_A, TRIAL_B, TRIAL_C])
+
+    async def fake_get_trial_details(nct_id: str) -> DetailQueryResult[TrialDetail]:
+        detail_map = {
+            DETAIL_A.nct_id: DETAIL_A,
+            DETAIL_B.nct_id: DETAIL_B,
+            DETAIL_C.nct_id: DETAIL_C,
+        }
+        return DetailQueryResult(item=detail_map.get(nct_id), queried_sources=["clinicaltrials_gov"], warnings=[])
+
+    async def fake_search_approved_drugs(**_: object) -> ListQueryResult[ApprovedDrug]:
+        return ListQueryResult(queried_sources=["openfda"], warnings=[], items=[APPROVED_DRUG_1])
+
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_oncology_burden", fake_search_oncology_burden)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_trials", fake_search_trials)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.get_trial_details", fake_get_trial_details)
+    monkeypatch.setattr("Medical_Wizard_MCP.tools.intelligence.registry.search_approved_drugs", fake_search_approved_drugs)
+
+    response = await estimate_commercial_opportunity_proxy(indication="NSCLC")
+
+    assert response["result"]["proxy_type"] == "commercial_opportunity_proxy"
+    assert response["result"]["overall_proxy_score"] > 0
+    assert response["result"]["proxy_components"]["medication_gap_score"] > 0
+    assert response["result"]["economic_proxy_limits"]["includes_sales_data"] is False
+    assert response["result"]["country_opportunity_rankings"]
+    assert response["_meta"]["output_kind"] == "heuristic"

@@ -17,10 +17,13 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "use_when": [
             "You are unsure which MCP tool to call next.",
             "You need a machine-readable tool routing guide.",
+            "Several tools overlap and you need the canonical choice before calling anything else.",
         ],
         "avoid_when": [
             "You already know the exact tool to call.",
+            "You need biomedical evidence rather than metadata about the tool surface itself.",
         ],
+        "decision_boundary": "Use this as the router when the question could fit multiple tools. Do not use it as a substitute for trials, literature, conference, safety, or burden evidence.",
         "typical_next_tools": [
             "search_trials",
             "search_publications",
@@ -114,7 +117,11 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         ],
         "avoid_when": [
             "You want unpublished or early-stage evidence only.",
+            "You want conference-stage evidence rather than peer-reviewed journal records.",
+            "You want one bundled asset-centric brief across trials, publications, conferences, and approvals.",
         ],
+        "decision_boundary": "Use this for PubMed records only. If the user wants preprints call search_preprints; for congress evidence call search_conference_abstracts; for a one-trial bundle call link_trial_evidence; for an asset-wide bundle call asset_dossier.",
+        "choose_instead_of": ["search_preprints", "search_conference_abstracts", "link_trial_evidence", "asset_dossier"],
         "typical_next_tools": [
             "search_preprints",
             "summarize_safety_signals",
@@ -137,7 +144,10 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         ],
         "avoid_when": [
             "You need established peer-reviewed evidence first.",
+            "You want an asset-wide multi-source brief rather than preprint records only.",
         ],
+        "decision_boundary": "Use this for emerging, non-peer-reviewed evidence. If the user needs journal evidence first call search_publications; for congress evidence call search_conference_abstracts; for a bundled asset brief call asset_dossier.",
+        "choose_instead_of": ["search_publications", "search_conference_abstracts", "asset_dossier"],
         "typical_next_tools": [
             "search_publications",
             "summarize_safety_signals",
@@ -168,7 +178,10 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         ],
         "avoid_when": [
             "You only need peer-reviewed literature and do not want conference-stage evidence.",
+            "You want a full cross-source asset brief rather than conference evidence only.",
         ],
+        "decision_boundary": "Use this only for conference-stage evidence. If the user wants journal records call search_publications; for preprints call search_preprints; for an asset-centric bundle call asset_dossier.",
+        "choose_instead_of": ["search_publications", "search_preprints", "asset_dossier"],
         "typical_next_tools": [
             "search_publications",
             "get_document_passages",
@@ -190,7 +203,10 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         ],
         "avoid_when": [
             "You are searching investigational trials rather than approved products.",
+            "You want a disease-level strategy proxy rather than raw approved-drug records.",
         ],
+        "decision_boundary": "Use this for raw approved-drug or label context only. If the user wants a strategic opportunity proxy that mixes burden, visible competition, and treatment scarcity, use estimate_commercial_opportunity_proxy instead.",
+        "choose_instead_of": ["estimate_commercial_opportunity_proxy"],
         "typical_next_tools": [
             "summarize_safety_signals",
             "watch_indication_signals",
@@ -220,11 +236,66 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         ],
         "avoid_when": [
             "You need trial, publication, or approved-drug evidence instead of burden records.",
+            "You want burden compared directly against clinical-trial geography or site footprint.",
+            "You want a composite commercial-style proxy rather than raw burden rows.",
         ],
+        "decision_boundary": "Use this for raw epidemiology rows only. If the question is about where burden is high relative to visible trial activity, call burden_vs_trial_footprint instead. If the question asks for a commercial-style prioritization proxy, call estimate_commercial_opportunity_proxy instead.",
+        "choose_instead_of": ["burden_vs_trial_footprint", "estimate_commercial_opportunity_proxy"],
         "typical_next_tools": [
             "search_trials",
             "search_publications",
             "search_approved_drugs",
+        ],
+    },
+    "burden_vs_trial_footprint": {
+        "category": "analysis",
+        "family": "cross_source",
+        "output_kind": "derived",
+        "stability": "stable",
+        "workflow_position": "secondary",
+        "canonical_parameters": ["indication", "indicator", "year", "phase", "sponsor", "status", "max_results"],
+        "parameter_aliases": {},
+        "requires_identifiers": [],
+        "use_when": [
+            "You want countries ranked by high burden and low visible trial-site footprint.",
+            "You need an indication-level opportunity scan that combines epidemiology with visible clinical-operations presence.",
+        ],
+        "avoid_when": [
+            "You only need raw burden rows with no trial comparison.",
+            "You only need raw site geography from trials with no epidemiology layer.",
+            "You want a composite strategic proxy that also includes approved-treatment scarcity.",
+        ],
+        "decision_boundary": "Use this when the question is explicitly about epidemiology versus visible study footprint. For raw burden rows use search_oncology_burden; for raw site or investigator geography use investigator_site_landscape; for a broader commercial-style prioritization proxy use estimate_commercial_opportunity_proxy.",
+        "choose_instead_of": ["search_oncology_burden", "investigator_site_landscape", "estimate_commercial_opportunity_proxy"],
+        "typical_next_tools": [
+            "search_oncology_burden",
+            "investigator_site_landscape",
+            "search_trials",
+        ],
+    },
+    "estimate_commercial_opportunity_proxy": {
+        "category": "analysis",
+        "family": "commercial_proxy",
+        "output_kind": "heuristic",
+        "stability": "stable",
+        "workflow_position": "optional",
+        "canonical_parameters": ["indication", "indicator", "year", "max_results"],
+        "parameter_aliases": {},
+        "requires_identifiers": [],
+        "use_when": [
+            "You want a rough strategy proxy for commercial attractiveness using disease burden, treatment scarcity, and visible competition.",
+            "You need a prioritization aid when true pricing, reimbursement, sales, or access data are not available.",
+        ],
+        "avoid_when": [
+            "You need real revenue estimates, market size, pricing, or reimbursement analysis.",
+            "You only need raw burden, trial, or approved-drug records without a composite score.",
+        ],
+        "decision_boundary": "Use this only for heuristic strategic prioritization. For raw epidemiology use search_oncology_burden; for burden versus site footprint use burden_vs_trial_footprint; for actual commercial modeling you need new sources beyond the current MCP.",
+        "choose_instead_of": ["search_oncology_burden", "burden_vs_trial_footprint", "search_approved_drugs"],
+        "typical_next_tools": [
+            "burden_vs_trial_footprint",
+            "search_approved_drugs",
+            "competitive_landscape",
         ],
     },
     "compare_trials": {
@@ -467,7 +538,10 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "avoid_when": [
             "You need exact citation matching rather than query-based associations.",
             "You have not resolved the trial identity to an NCT ID yet.",
+            "You want an asset- or sponsor-level brief spanning multiple trials rather than one known trial.",
         ],
+        "decision_boundary": "Use this for one known NCT ID. If the user cares about a named asset, therapy, or sponsor across multiple studies, call asset_dossier instead.",
+        "choose_instead_of": ["asset_dossier"],
         "typical_next_tools": [
             "search_publications",
             "search_preprints",
@@ -528,10 +602,39 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         ],
         "avoid_when": [
             "You need trial-level detail rather than sponsor-level grouping.",
+            "You want publications, conference signals, or approved-drug context in the same answer.",
         ],
+        "decision_boundary": "Use this for trial-derived sponsor/asset grouping only. If the user wants one richer, cross-source asset brief, use asset_dossier instead.",
+        "choose_instead_of": ["asset_dossier", "search_trials"],
         "typical_next_tools": [
             "competitive_landscape",
             "search_trials",
+        ],
+    },
+    "asset_dossier": {
+        "category": "analysis",
+        "family": "portfolio",
+        "output_kind": "derived",
+        "stability": "stable",
+        "workflow_position": "secondary",
+        "canonical_parameters": ["asset", "indication", "sponsor", "year_from", "include_preprints", "include_conference_signals", "include_approvals"],
+        "parameter_aliases": {},
+        "requires_identifiers": [],
+        "use_when": [
+            "You want one asset-centric brief that bundles trials, publications, preprints, conference signals, and optional approved-drug context.",
+            "The user is asking about one named therapy, program, or asset rather than a broad indication.",
+        ],
+        "avoid_when": [
+            "You only need raw records from one source family.",
+            "You only have one specific NCT ID and want a trial-level evidence bundle.",
+        ],
+        "decision_boundary": "Use this for asset- or program-level synthesis across multiple sources. For one known trial use link_trial_evidence; for indication-wide watchlists use watch_indication_signals; for sponsor/asset grouping without literature use track_competitor_assets.",
+        "choose_instead_of": ["link_trial_evidence", "watch_indication_signals", "track_competitor_assets"],
+        "typical_next_tools": [
+            "search_trials",
+            "search_publications",
+            "search_conference_abstracts",
+            "search_approved_drugs",
         ],
     },
     "summarize_safety_signals": {
@@ -588,7 +691,10 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         ],
         "avoid_when": [
             "You want raw source records and full LLM-driven synthesis instead of a packaged snapshot.",
+            "The user is asking about one named asset or sponsor program rather than the whole indication.",
         ],
+        "decision_boundary": "Use this for indication-level monitoring across sources. If the ask is centered on one asset or therapy name, use asset_dossier instead.",
+        "choose_instead_of": ["asset_dossier", "track_indication_changes"],
         "typical_next_tools": [
             "search_trials",
             "search_publications",
@@ -688,9 +794,9 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
 
 
 OUTPUT_KIND_NOTES = {
-    "raw": "This tool returns source-aligned records. Prefer doing synthesis in the LLM layer.",
-    "derived": "This tool returns server-side aggregations over source records. Verify with raw tools for high-stakes use.",
-    "heuristic": "This tool includes server-side heuristics or recommendations. Treat the result as a draft, not ground truth.",
+    "raw": "This tool returns source-aligned records. Prefer these when precision, source review, or custom LLM synthesis matters most.",
+    "derived": "This tool returns server-side aggregations over source records. Use it for faster orientation, then verify with raw tools for high-stakes use.",
+    "heuristic": "This tool includes server-side heuristics or recommendations. Treat the output as a draft starting point, not ground truth.",
 }
 
 
