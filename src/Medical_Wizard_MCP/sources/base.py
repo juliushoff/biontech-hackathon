@@ -50,5 +50,6 @@ class BaseSource(ABC):
         self,
         query: str,
         max_results: int = 10,
+        year_from: int | None = None,
     ) -> list[Publication]:
         return []

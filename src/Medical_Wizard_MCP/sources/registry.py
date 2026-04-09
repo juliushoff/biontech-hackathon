@@ -104,10 +104,15 @@ class SourceRegistry:
         self,
         query: str,
         max_results: int = 10,
+        year_from: int | None = None,
     ) -> list[Publication]:
         await self.initialize_all()
         tasks = [
-            source.search_publications(query=query, max_results=max_results)
+            source.search_publications(
+                query=query,
+                max_results=max_results,
+                year_from=year_from,
+            )
             for source in self._sources
         ]
         results: list[Publication] = []
