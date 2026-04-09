@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Medical Wizard MCP server for clinical trial and publication intelligence"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.2.0",
     "httpx",
     "pydantic>=2.0",
     "python-dotenv",
+    "fastmcp>=3.2.2",
 ]
 
 [project.optional-dependencies]

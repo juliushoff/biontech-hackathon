@@ -1,6 +1,6 @@
 import os
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 mcp = FastMCP(
     name="Medical Wizard MCP",
@@ -9,4 +9,5 @@ mcp = FastMCP(
     streamable_http_path=os.getenv("MCP_MOUNT_PATH", "/mcp"),
     stateless_http=True,
     json_response=True,
+    version=os.getenv("MCP_VERSION", "local"),
 )
