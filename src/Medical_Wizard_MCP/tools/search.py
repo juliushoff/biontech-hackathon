@@ -1,3 +1,4 @@
+import asyncio
 import re
 from typing import Any
 
@@ -102,9 +103,9 @@ Args:
     max_results = min(max_results, 20)
     responses = []
     if trial_query_variants:
-        for variant in trial_query_variants:
-            responses.append(
-                await registry.search_trials(
+        responses = await asyncio.gather(
+            *[
+                registry.search_trials(
                     condition=resolved_indication or variant,
                     query=variant,
                     phase=phase,
@@ -113,7 +114,9 @@ Args:
                     intervention=intervention,
                     max_results=max_results,
                 )
-            )
+                for variant in trial_query_variants
+            ]
+        )
     else:
         responses.append(
             await registry.search_trials(

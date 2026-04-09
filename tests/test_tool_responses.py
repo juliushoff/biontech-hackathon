@@ -270,6 +270,39 @@ async def test_search_publications_supports_term_and_reports_failures(
 
 
 @pytest.mark.asyncio
+async def test_search_approved_drugs_reports_partial_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_search_approved_drugs(**_: object) -> ListQueryResult[ApprovedDrug]:
+        return ListQueryResult(
+            queried_sources=["openfda"],
+            warnings=[
+                SourceWarning(
+                    source="openfda",
+                    stage="search_approved_drugs",
+                    error="openfda search_approved_drugs timed out after 12.0s",
+                )
+            ],
+            items=[],
+        )
+
+    monkeypatch.setattr(
+        "Medical_Wizard_MCP.tools.drugs.registry.search_approved_drugs",
+        fake_search_approved_drugs,
+    )
+
+    response = await search_approved_drugs(indication="NSCLC", intervention="pembrolizumab")
+
+    assert response["count"] == 0
+    assert response["_meta"]["tool"] == "search_approved_drugs"
+    assert response["_meta"]["queried_sources"] == ["openfda"]
+    assert response["_meta"]["requested_filters"]["indication"] == "NSCLC"
+    assert response["_meta"]["requested_filters"]["intervention"] == "pembrolizumab"
+    assert response["_meta"]["partial_failures"][0]["stage"] == "search_approved_drugs"
+    assert "timed out" in response["_meta"]["partial_failures"][0]["error"]
+
+
+@pytest.mark.asyncio
 async def test_get_trial_details_rejects_invalid_id() -> None:
     response = await get_trial_details("FDA:123")
 

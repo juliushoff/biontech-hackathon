@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from ..models import ConferenceAbstract
+from ._network import SourceTimeoutError, build_http_timeout
 from ._conference_utils import (
     clean_text,
     conference_query_variants,
@@ -33,7 +34,7 @@ class EuropePMCConferenceSource(BaseSource):
     async def initialize(self) -> None:
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
-            timeout=30.0,
+            timeout=build_http_timeout(),
             headers={"User-Agent": "medical-wizard-mcp/0.1.0"},
         )
 
@@ -67,6 +68,8 @@ class EuropePMCConferenceSource(BaseSource):
                 response = await self._client.get("/search", params=params)
                 response.raise_for_status()
                 payload = response.json()
+            except httpx.TimeoutException as exc:
+                raise SourceTimeoutError("Europe PMC search timed out") from exc
             except httpx.HTTPStatusError as exc:
                 raise RuntimeError(f"Europe PMC search failed with status {exc.response.status_code}") from exc
             except httpx.HTTPError as exc:

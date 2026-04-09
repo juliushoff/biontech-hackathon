@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Awaitable, Callable, Generic, TypeVar
 
 from ..models import (
     ApprovedDrug,
@@ -15,6 +15,12 @@ from ..models import (
     TrialTimeline,
 )
 from .base import BaseSource
+from ._network import (
+    SOURCE_TIMEOUT_RETRIES,
+    SourceTimeoutError,
+    format_source_timeout_message,
+    timeout_backoff_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +166,53 @@ class SourceRegistry:
 
         return [deduped_by_key[key] for key in ordered_keys] + passthrough_items
 
+    async def _run_source_call(
+        self,
+        *,
+        source: BaseSource,
+        stage: str,
+        requested_max_results: int | None = None,
+        operation_factory: Callable[[], Awaitable[T]],
+    ) -> T:
+        timeout_seconds = source.call_timeout_seconds(
+            stage=stage,
+            requested_max_results=requested_max_results,
+        )
+        last_timeout_error: Exception | None = None
+        for attempt in range(SOURCE_TIMEOUT_RETRIES + 1):
+            try:
+                return await asyncio.wait_for(operation_factory(), timeout=timeout_seconds)
+            except asyncio.TimeoutError as exc:
+                last_timeout_error = exc
+                if attempt >= SOURCE_TIMEOUT_RETRIES:
+                    break
+                delay = timeout_backoff_seconds(attempt + 1)
+                logger.warning(
+                    "Retrying %s %s after outer timeout on attempt %s/%s in %.2fs",
+                    source.name,
+                    stage,
+                    attempt + 1,
+                    SOURCE_TIMEOUT_RETRIES + 1,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            except SourceTimeoutError as exc:
+                last_timeout_error = exc
+                if attempt >= SOURCE_TIMEOUT_RETRIES:
+                    raise
+                delay = timeout_backoff_seconds(attempt + 1)
+                logger.warning(
+                    "Retrying %s %s after source timeout on attempt %s/%s in %.2fs: %s",
+                    source.name,
+                    stage,
+                    attempt + 1,
+                    SOURCE_TIMEOUT_RETRIES + 1,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+        raise RuntimeError(format_source_timeout_message(source.name, stage, timeout_seconds)) from last_timeout_error
+
     async def search_trials(
         self,
         condition: str,
@@ -174,19 +227,30 @@ class SourceRegistry:
         sources, warnings = self._sources_for("trial_search")
 
         results: list[TrialSummary] = []
-        outcomes = await asyncio.gather(
-            *[
-                source.search_trials(
-                    condition=condition,
-                    query=query,
-                    phase=phase,
-                    status=status,
-                    sponsor=sponsor,
-                    intervention=intervention,
-                    max_results=max_results,
+        tasks = []
+        for source in sources:
+            source_max_results = source.expand_max_results(
+                stage="search_trials",
+                requested_max_results=max_results,
+            )
+            tasks.append(
+                self._run_source_call(
+                    source=source,
+                    stage="search_trials",
+                    requested_max_results=source_max_results,
+                    operation_factory=lambda source=source, source_max_results=source_max_results: source.search_trials(
+                        condition=condition,
+                        query=query,
+                        phase=phase,
+                        status=status,
+                        sponsor=sponsor,
+                        intervention=intervention,
+                        max_results=source_max_results,
+                    ),
                 )
-                for source in sources
-            ],
+            )
+        outcomes = await asyncio.gather(
+            *tasks,
             return_exceptions=True,
         )
 
@@ -222,7 +286,12 @@ class SourceRegistry:
 
         for source in sources:
             try:
-                detail = await source.get_trial_details(nct_id)
+                detail = await self._run_source_call(
+                    source=source,
+                    stage="get_trial_details",
+                    requested_max_results=None,
+                    operation_factory=lambda source=source: source.get_trial_details(nct_id),
+                )
                 if detail is not None:
                     return DetailQueryResult(
                         item=detail,
@@ -257,17 +326,28 @@ class SourceRegistry:
         sources, warnings = self._sources_for("trial_timelines")
 
         results: list[TrialTimeline] = []
-        outcomes = await asyncio.gather(
-            *[
-                source.get_trial_timelines(
-                    condition=condition,
-                    sponsor=sponsor,
-                    phase=phase,
-                    status=status,
-                    max_results=max_results,
+        tasks = []
+        for source in sources:
+            source_max_results = source.expand_max_results(
+                stage="get_trial_timelines",
+                requested_max_results=max_results,
+            )
+            tasks.append(
+                self._run_source_call(
+                    source=source,
+                    stage="get_trial_timelines",
+                    requested_max_results=source_max_results,
+                    operation_factory=lambda source=source, source_max_results=source_max_results: source.get_trial_timelines(
+                        condition=condition,
+                        sponsor=sponsor,
+                        phase=phase,
+                        status=status,
+                        max_results=source_max_results,
+                    ),
                 )
-                for source in sources
-            ],
+            )
+        outcomes = await asyncio.gather(
+            *tasks,
             return_exceptions=True,
         )
 
@@ -307,15 +387,26 @@ class SourceRegistry:
         sources, warnings = self._sources_for("publication_search")
 
         results: list[Publication] = []
-        outcomes = await asyncio.gather(
-            *[
-                source.search_publications(
-                    query=query,
-                    max_results=max_results,
-                    year_from=year_from,
+        tasks = []
+        for source in sources:
+            source_max_results = source.expand_max_results(
+                stage="search_publications",
+                requested_max_results=max_results,
+            )
+            tasks.append(
+                self._run_source_call(
+                    source=source,
+                    stage="search_publications",
+                    requested_max_results=source_max_results,
+                    operation_factory=lambda source=source, source_max_results=source_max_results: source.search_publications(
+                        query=query,
+                        max_results=source_max_results,
+                        year_from=year_from,
+                    ),
                 )
-                for source in sources
-            ],
+            )
+        outcomes = await asyncio.gather(
+            *tasks,
             return_exceptions=True,
         )
 
@@ -357,15 +448,26 @@ class SourceRegistry:
         sources, warnings = self._sources_for("preprint_search")
 
         results: list[Publication] = []
-        outcomes = await asyncio.gather(
-            *[
-                source.search_preprints(
-                    query=query,
-                    max_results=max_results,
-                    year_from=year_from,
+        tasks = []
+        for source in sources:
+            source_max_results = source.expand_max_results(
+                stage="search_preprints",
+                requested_max_results=max_results,
+            )
+            tasks.append(
+                self._run_source_call(
+                    source=source,
+                    stage="search_preprints",
+                    requested_max_results=source_max_results,
+                    operation_factory=lambda source=source, source_max_results=source_max_results: source.search_preprints(
+                        query=query,
+                        max_results=source_max_results,
+                        year_from=year_from,
+                    ),
                 )
-                for source in sources
-            ],
+            )
+        outcomes = await asyncio.gather(
+            *tasks,
             return_exceptions=True,
         )
 
@@ -407,16 +509,27 @@ class SourceRegistry:
         sources, warnings = self._sources_for("approved_drug_search")
 
         results: list[ApprovedDrug] = []
-        outcomes = await asyncio.gather(
-            *[
-                source.search_approved_drugs(
-                    indication=indication,
-                    sponsor=sponsor,
-                    intervention=intervention,
-                    max_results=max_results,
+        tasks = []
+        for source in sources:
+            source_max_results = source.expand_max_results(
+                stage="search_approved_drugs",
+                requested_max_results=max_results,
+            )
+            tasks.append(
+                self._run_source_call(
+                    source=source,
+                    stage="search_approved_drugs",
+                    requested_max_results=source_max_results,
+                    operation_factory=lambda source=source, source_max_results=source_max_results: source.search_approved_drugs(
+                        indication=indication,
+                        sponsor=sponsor,
+                        intervention=intervention,
+                        max_results=source_max_results,
+                    ),
                 )
-                for source in sources
-            ],
+            )
+        outcomes = await asyncio.gather(
+            *tasks,
             return_exceptions=True,
         )
 
@@ -459,16 +572,27 @@ class SourceRegistry:
         sources, warnings = self._sources_for("conference_abstract_search")
 
         results: list[ConferenceAbstract] = []
-        outcomes = await asyncio.gather(
-            *[
-                source.search_conference_abstracts(
-                    query=query,
-                    conference_series=conference_series,
-                    max_results=max_results,
-                    year_from=year_from,
+        tasks = []
+        for source in sources:
+            source_max_results = source.expand_max_results(
+                stage="search_conference_abstracts",
+                requested_max_results=max_results,
+            )
+            tasks.append(
+                self._run_source_call(
+                    source=source,
+                    stage="search_conference_abstracts",
+                    requested_max_results=source_max_results,
+                    operation_factory=lambda source=source, source_max_results=source_max_results: source.search_conference_abstracts(
+                        query=query,
+                        conference_series=conference_series,
+                        max_results=source_max_results,
+                        year_from=year_from,
+                    ),
                 )
-                for source in sources
-            ],
+            )
+        outcomes = await asyncio.gather(
+            *tasks,
             return_exceptions=True,
         )
 
